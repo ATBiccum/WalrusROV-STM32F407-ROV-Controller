@@ -3,19 +3,6 @@
  * 28/09/2022
  * Alexander, Tony, Clinton
  *
- * 
- * TODO:
- *  1. Apply parsed packets to motor control maps
- *  2. When no packet received: force motors to off
- *
- * 
- *
- * DONE:
- * 1. Consistent wireless coms 
- * 2. Test packet parsing and verification
- *
- * CONFIGS:
- *
  * PS3 Controls Packet Format: 
  *  1  4   7  10   13  16  19 20 21 22 23 24 25 28
  * "# 000 000 000 000 000 000 0  0  0  0  0  0  000" = 28
@@ -34,7 +21,6 @@
  * https://forum.arduino.cc/t/simple-nrf24l01-2-4ghz-transceiver-demo/405123
  * https://os.mbed.com/users/belloula/code/mbed_blinko//file/84c281baac9c/main.cpp/
  *
- *
  */
 #include <mbed.h>
 #include <stdio.h>
@@ -46,11 +32,11 @@
 #define ARRAY_LEN(x)            (sizeof(x) / sizeof((x)[0]))
 
 UART_HandleTypeDef huart2; //Serial Monitor
-UART_HandleTypeDef huart3; //RS485 Coms
-PwmOut motor1(PA_0);       //Motor PWM Pin: PA_0
+UART_HandleTypeDef huart3; //RS485 Coms7
 
 Thread packetParserThread;
 Thread motorControlThread;
+Thread nRF24Thread;
 
 //Packet from Control Station Parsed Variables
 int L1;
@@ -68,7 +54,7 @@ int Square;
 
 //RS485 Tx and Rx Variables
 uint8_t RS485_RxData[32] = {0};
-uint8_t RS485_TxData[32] = "#99900000013411115413200000099";
+uint8_t RS485_TxData[32] = {0}; //"#99900000013411115413200000099"
 size_t old_posRx;
 size_t posRx;
 bool newData = false;
@@ -84,22 +70,25 @@ int main()
     SystemClock_Config();   
     GPIO_Init();
     USART2_UART_Init();
-    //DMA_Init();
     USART3_UART_Init();
     
     //Starting of threads:
-    //nRF24Thread.start(nRF24);
-    //packetParserThread.start(packetParser);
-    //motorControlThread.start(motorControl);
+    nRF24Thread.start(nRF24);
+    packetParserThread.start(packetParser);
+    motorControlThread.start(motorControl);
+
+    USART3_DMA1_Start_Transmit();
+
     while(1)
     {
         HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
         HAL_Delay(500);
-        USART3_DMA2_Start_Transmit();
-        printf("Received Data: %s", RS485_RxData);
+
+        printf("Received RS485 Data: %s\n", RS485_RxData);
+        printf("L1: %d|L2: %d|LeftHatX: %d|LeftHatY: %d|RightHatX: %d|RightHatY: %d|R1: %d|R2: %d|Triangle: %d|Circle: %d|Cross: %d|Square: %d|\n", L1, L2, LeftHatX, LeftHatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square);
     }
 }
-void USART3_DMA2_Start_Transmit(void)
+void USART3_DMA1_Start_Transmit(void)
 {
     /*
      * Steps to Transmit on USART using DMA: In Order
@@ -157,87 +146,167 @@ void USART_Process_Data(uint8_t* data, size_t len)
     newData = true;
 }
 
-//Active Functions: (Called Often)
 void motorControl()
 {
+    //Thread that control PWM signal outputs within parameters below, uses global parsed data
     //Initialize PWM: 3.9ms Period | 256Hz | High DC: 48% | Stop DC: 38% | Low DC: 28%
-    //motor1.period(0.0039);
 
-    //int control;
-    //int control1;
-    //control1 = map(control, 255, 0, 27, 48);
-    //float control2 = (float)control1 / 100.0;
-    //motor1.write(control2);
-    //printf("Received Controls |L1: %d|R1: %d|L2: %d|R2: %d|LeftHatX: %d|LeftHatY: %d|RightHatX: %d|RightHatY: %d|Triangle: %d|Circle: %d|Cross: %d|Square: %d|\n", L1, R1, L2, R2, LeftHatX, LeftHatY, RightHatX, RightHatY, Triangle, Circle, Cross, Square);
+    //Pin Initializations:
+    PwmOut motor1(PA_0);       //Motor: Front Z
+    PwmOut motor2(PA_0);       //Motor: Rear Z
+    PwmOut motor3(PA_0);       //Motor: Front Right
+    PwmOut motor4(PA_0);       //Motor: Front Left
+    PwmOut motor5(PA_0);       //Motor: Back Right
+    PwmOut motor6(PA_0);       //Motor: Back Left
+
+    //Period / Frequency Initializations:
+    motor1.period(0.0039);
+    motor2.period(0.0039);
+    motor3.period(0.0039);
+    motor4.period(0.0039);
+    motor5.period(0.0039);
+    motor6.period(0.0039);
+
+    float motor1DC; 
+    float motor2DC;
+    float motor3DC;
+    float motor4DC;
+    float motor5DC;
+    float motor6DC;
+
+    while (1)
+    {
+        //Motor control loop; deadzone programmed with < > values; only ever 2 motors on at once
+        //If none of these conditions are met, returns all motors to off PWM of 38%
+        if (LeftHatY > 115 && LeftHatY < 255)
+        {
+            //Move Forward (motor 5 and motor 6: 48% > DC > 38%)
+            motor5DC = (float)(map(LeftHatY, 255, 0, 28, 48))/100.0;
+            motor6DC = (float)(map(LeftHatY, 255, 0, 28, 48))/100.0;
+
+            motor5.write(motor5DC);
+            motor6.write(motor6DC);
+        }
+        else if (LeftHatY < 110 && LeftHatY > 0)
+        {
+            //Move Backwards: (motor 5 and motor 6: 38% > DC > 28%)
+            motor5DC = (float)(map(LeftHatY, 255, 0, 28, 48))/100.0;
+            motor6DC = (float)(map(LeftHatY, 255, 0, 28, 48))/100.0;
+
+            motor5.write(motor5DC);
+            motor6.write(motor6DC);
+        }
+        else if (LeftHatX < 130 && LeftHatX > 0)
+        {
+            //Move Left: (motor 5 and motor 3: 48% > DC > 38%)
+            motor5DC = (float)(map(LeftHatX, 255, 0, 28, 48))/100.0;
+            motor3DC = (float)(map(LeftHatX, 255, 0, 28, 48))/100.0;
+
+            motor5.write(motor5DC);
+            motor3.write(motor3DC);
+        }
+        else if (LeftHatX > 140 && LeftHatX < 255)
+        {
+            //Move Right: (motor 6 and motor 4: 48% > DC > 38%)
+            motor6DC = (float)(map(LeftHatX, 255, 0, 28, 48))/100.0;
+            motor4DC = (float)(map(LeftHatX, 255, 0, 28, 48))/100.0;
+
+            motor6.write(motor6DC);
+            motor4.write(motor4DC);
+
+        }
+        else if (L1 > 10 && L1 < 255)
+        {
+            //Move Up (motor 1 and motor 2: 38% > DC > 48%)
+            motor1DC = (float)(map(L1, 0, 255, 38, 48))/100.0;
+            motor2DC = (float)(map(L1, 0, 255, 38, 48))/100.0;
+
+            motor1.write(motor1DC);
+            motor2.write(motor2DC);
+        }
+        else if (L2 > 10 && L2 < 255)
+        {
+            //Move Down (motor 1 and motor 2: 28% > DC > 38%)
+            motor1DC = (float)(map(L2, 0, 255, 38, 28))/100.0;
+            motor2DC = (float)(map(L2, 0, 255, 38, 28))/100.0;
+
+            motor1.write(motor1DC);
+            motor2.write(motor2DC);
+        }
+        else
+        {
+            //Idle mode
+            motor1.write(38.0);
+            motor2.write(38.0);
+            motor3.write(38.0);
+            motor4.write(38.0);
+            motor5.write(38.0);
+            motor6.write(38.0);
+        }
+    }
 }
 
 void packetParser()
 {
-    //Parser steps: 
-    //1. If first value of packet is # 
-    //2. Parse data into char variable
-    //3. Convert char value to int and store in its proper variable
-    //4. Map that value to corresponding duty cycle
     while(1)
     {
-        //L1
         if (newData == true)
         {
-        memcpy(subtext3, &RS485_RxData[1], 3);
-        subtext3[3] = '\0';
-        sscanf(subtext3, "%d", &L1);
-        L1 = map(L1, 0, 255, 27, 48);
-        //L2
-        memcpy(subtext3, &RS485_RxData[4], 3);
-        subtext3[3] = '\0';
-        sscanf(subtext3, "%d", &L2);
-        L2 = map(L2, 0, 255, 27, 48);
-        //LeftHatX
-        memcpy(subtext3, &RS485_RxData[7], 3);
-        subtext3[3] = '\0';
-        sscanf(subtext3, "%d", &LeftHatX);
-        LeftHatX = map(LeftHatX, 255, 0, 27, 48);
-        //LeftHatY
-        memcpy(subtext3, &RS485_RxData[10], 3);
-        subtext3[3] = '\0';
-        sscanf(subtext3, "%d", &LeftHatY);
-        LeftHatY = map(LeftHatY, 255, 0, 27, 48);
-        //RightHatX
-        memcpy(subtext3, &RS485_RxData[13], 3);
-        subtext3[3] = '\0';
-        sscanf(subtext3, "%d", &RightHatX);
-        RightHatX = map(RightHatX, 255, 0, 27, 48);
-        //RightHatY
-        memcpy(subtext3, &RS485_RxData[16], 3);
-        subtext3[3] = '\0';
-        sscanf(subtext3, "%d", &RightHatY);
-        RightHatY = map(RightHatY, 255, 0, 27, 48);
-        //R1
-        memcpy(subtext1, &RS485_RxData[19], 1);
-        subtext1[1] = '\0';
-        sscanf(subtext1, "%d", &R1);
-        //R2
-        memcpy(subtext1, &RS485_RxData[20], 1);
-        subtext1[1] = '\0';
-        sscanf(subtext1, "%d", &R2);
-        //Triangle
-        memcpy(subtext1, &RS485_RxData[21], 1);
-        subtext1[1] = '\0';
-        sscanf(subtext1, "%d", &Triangle);
-        //Circle
-        memcpy(subtext1, &RS485_RxData[22], 1);
-        subtext1[1] = '\0';
-        sscanf(subtext1, "%d", &Circle);           
-        //Cross
-        memcpy(subtext1, &RS485_RxData[23], 1);
-        subtext1[1] = '\0';
-        sscanf(subtext1, "%d", &Cross);
-        //Square
-        memcpy(subtext1, &RS485_RxData[24], 1);
-        subtext1[1] = '\0';
-        sscanf(subtext1, "%d", &Square);     
+            memcpy(subtext3, &RS485_RxData[1], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &L1);
+            L1 = map(L1, 0, 255, 27, 48);
+            //L2
+            memcpy(subtext3, &RS485_RxData[4], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &L2);
+            L2 = map(L2, 0, 255, 27, 48);
+            //LeftHatX
+            memcpy(subtext3, &RS485_RxData[7], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &LeftHatX);
+            LeftHatX = map(LeftHatX, 255, 0, 27, 48);
+            //LeftHatY
+            memcpy(subtext3, &RS485_RxData[10], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &LeftHatY);
+            LeftHatY = map(LeftHatY, 255, 0, 27, 48);
+            //RightHatX
+            memcpy(subtext3, &RS485_RxData[13], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &RightHatX);
+            RightHatX = map(RightHatX, 255, 0, 27, 48);
+            //RightHatY
+            memcpy(subtext3, &RS485_RxData[16], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &RightHatY);
+            RightHatY = map(RightHatY, 255, 0, 27, 48);
+            //R1
+            memcpy(subtext1, &RS485_RxData[19], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &R1);
+            //R2
+            memcpy(subtext1, &RS485_RxData[20], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &R2);
+            //Triangle
+            memcpy(subtext1, &RS485_RxData[21], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &Triangle);
+            //Circle
+            memcpy(subtext1, &RS485_RxData[22], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &Circle);           
+            //Cross
+            memcpy(subtext1, &RS485_RxData[23], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &Cross);
+            //Square
+            memcpy(subtext1, &RS485_RxData[24], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &Square);     
 
-        printf("L1: %d|L2: %d|LeftHatX: %d|LeftHatY: %d|RightHatX: %d|RightHatY: %d|R1: %d|R2: %d|Triangle: %d|Circle: %d|Cross: %d|Square: %d|\n", L1, L2, LeftHatX, LeftHatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square);        
+            //printf("L1: %d|L2: %d|LeftHatX: %d|LeftHatY: %d|RightHatX: %d|RightHatY: %d|R1: %d|R2: %d|Triangle: %d|Circle: %d|Cross: %d|Square: %d|\n", L1, L2, LeftHatX, LeftHatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square);        
         }
     }
 }
@@ -439,7 +508,7 @@ void DMA1_Stream3_IRQHandler(void)
     /* Check transfer-complete interrupt */
     if (LL_DMA_IsEnabledIT_TC(DMA1, LL_DMA_STREAM_3) && LL_DMA_IsActiveFlag_TC3(DMA1)) {
         LL_DMA_ClearFlag_TC3(DMA1);             /* Clear transfer complete flag */
-        USART3_DMA2_Start_Transmit();                      /* Check for data to process */
+        USART3_DMA1_Start_Transmit();                      /* Check for data to process */
     }
 }
 

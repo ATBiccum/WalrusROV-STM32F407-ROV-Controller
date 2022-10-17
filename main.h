@@ -38,7 +38,7 @@ void DMA1_Stream1_IRQHandler(void);
 void USART3_IRQHandler(void);
 void USART_Rx_Check(void);
 void USART_Process_Data(uint8_t* data, size_t len);
-void USART3_DMA2_Start_Transmit(void);
+void USART3_DMA1_Start_Transmit(void);
 
 #endif
 
