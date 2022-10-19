@@ -8,6 +8,13 @@
  * "# 000 000 000 000 000 000 0  0  0  0  0  0  000" = 28
  * Pound, L1, L2, LeftHatX, LefthatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square, Checksum
  * 
+ * //Motor Pin Initializations:
+ * PwmOut motor1(PB_7);       //Motor: Front Z
+ * PwmOut motor2(PB_6);       //Motor: Rear Z
+ * PwmOut motor3(PE_6);       //Motor: Front Right
+ * PwmOut motor4(PF_8);       //Motor: Front Left
+ * PwmOut motor5(PF_7);       //Motor: Back Right
+ * PwmOut motor6(PF_6);       //Motor: Back Left
  *
  * RESORUCES:
  * https://os.mbed.com/users/Owen/code/nRF24L01P/
@@ -32,11 +39,10 @@
 #define ARRAY_LEN(x)            (sizeof(x) / sizeof((x)[0]))
 
 UART_HandleTypeDef huart2; //Serial Monitor
-UART_HandleTypeDef huart3; //RS485 Coms7
 
-Thread packetParserThread;
-Thread motorControlThread;
-Thread nRF24Thread;
+Thread packetParserThread; //Thread to parse packets into below variables
+Thread motorControlThread; //Thread that takes parsed packet data and maps to DC for motors 
+Thread nRF24Thread;        //Thread that handles data reception from transceivers 
 
 //Packet from Control Station Parsed Variables
 int L1;
@@ -53,96 +59,106 @@ int Cross;
 int Square;
 
 //RS485 Tx and Rx Variables
-uint8_t RS485_RxData[32] = {0};
-uint8_t RS485_TxData[32] = {0}; //"#99900000013411115413200000099"
+uint8_t RS485_RxDataBuf[32] = {0};
+uint8_t RS485_RxData[32] = {0};                              //"#99RANDOMSENSORDATABABYOHYA999"
+uint8_t RS485_TxData[32] = "#99RANDOMSENSORDATABABYOHYA999"; //"#99000000134111154132000000999"
 size_t old_posRx;
 size_t posRx;
 bool newData = false;
 
-//Buffers
+//Packet Parsing Buffers 
 char subtext3[4];   //3 Digit Buffer
 char subtext1[2];   //1 Digit Buffer
 
 int main()
 {
-    //Calling all init functions!
-    HAL_Init();             
-    SystemClock_Config();   
-    GPIO_Init();
-    USART2_UART_Init();
-    USART3_UART_Init();
+    NVIC_SetPriorityGrouping(NVIC_PRIORITYGROUP_4);
     
-    //Starting of threads:
-    nRF24Thread.start(nRF24);
-    packetParserThread.start(packetParser);
-    motorControlThread.start(motorControl);
-
-    USART3_DMA1_Start_Transmit();
+    SystemClock_Config();       //Initialize Clocks 
+    GPIO_Init();                //Initialize all GPIO Pins for Periph's and Outputs
+    USART2_UART_Init();         //Initialize UART2 for the Serial Monitor
+    USART3_UART_Init();         //Initialize UART3 for RS485 Coms
+    
+    motorControlThread.start(motorControl);     //Start Motor Control (Init's as OFF)
+    nRF24Thread.start(nRF24);                   //Start Rx and Tx for Wireless Packets
+    packetParserThread.start(packetParser);     //Start Parsing of Received Wireless Packets 
+    
+    DMA_Start_Transmit();               //Start DMA Transmission on UART3 for RS485
 
     while(1)
     {
-        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
+        LL_GPIO_TogglePin(GPIOD, LL_GPIO_PIN_12);
         HAL_Delay(500);
-
-        printf("Received RS485 Data: %s\n", RS485_RxData);
+        
+        printf("Raw Data: %s\n", RS485_RxDataBuf);
+        printf("Filtered Data: %s\n", RS485_RxData);
         printf("L1: %d|L2: %d|LeftHatX: %d|LeftHatY: %d|RightHatX: %d|RightHatY: %d|R1: %d|R2: %d|Triangle: %d|Circle: %d|Cross: %d|Square: %d|\n", L1, L2, LeftHatX, LeftHatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square);
+        
+       //Polling USART Transmit with DMA Debugging:
+        /*for (int i = 0; i < 33; i++)
+        {
+            HAL_Delay(1);
+            LL_USART_TransmitData8( USART1, RS485_TxData[i]);
+        }*/
+        //printf("DMA Buffer: %s\n", RS485_RxDataBuf); //DMA Buffer
+        //uint8_t length = LL_DMA_GetDataLength(DMA1, LL_DMA_STREAM_3);
+        //printf("Tx Length: %d\n", length);
+        //uint8_t len2 = LL_DMA_GetDataLength(DMA1, LL_DMA_STREAM_1);
+        //printf("Rx Length: %d\n", len2);
     }
 }
-void USART3_DMA1_Start_Transmit(void)
-{
-    /*
-     * Steps to Transmit on USART using DMA: In Order
-     * Configure DMA memory & peripheral addresses for UART and your buffer
-     * Configure DMA length (number of bytes to transmit in your case)
-     * Enable UART DMA TX request (not done in your example)
-     * Enable UART TX mode
-     * Enable UART itself
-     * Enable DMA channel
-     * Transmission will start
-     */
 
-    //Disable the channel to be reconfigured before Tx
-    LL_USART_Disable(USART3);
+/***ACTIVE FUNCTIONS***/
+void DMA_Start_Transmit(void)
+{
+    //Disable the channel or stream to be reconfigured before Tx
     LL_DMA_DisableStream(DMA1, LL_DMA_STREAM_3);
-    //Configure DMA memory & peripheral addresses for UART and your buffer
-    LL_DMA_SetPeriphAddress(DMA1, LL_DMA_STREAM_3, LL_USART_DMA_GetRegAddr(USART3));
+    //Configure DMA memory addresses for UART to grab from
     LL_DMA_SetMemoryAddress(DMA1, LL_DMA_STREAM_3, (uint32_t)RS485_TxData);
-    //Configure DMA length 
+    //Configure DMA length (number of bytes to transmit)
     LL_DMA_SetDataLength(DMA1, LL_DMA_STREAM_3, ARRAY_LEN(RS485_TxData));
-    //Enabe DMA Tx Request
-    LL_USART_EnableDMAReq_TX(USART3);
+    //Enabe UART DMA Tx Request
+    LL_USART_EnableDMAReq_TX(USART3); //this line freeze
+    //Enable UART Tx Direction
+    LL_USART_EnableDirectionTx(USART3); //Not sure if needed 
     //Clear all flags
-    LL_DMA_ClearFlag_TC4(DMA1);
-    //Enable UART Tx Mode
-    LL_USART_Enable(USART3);
-    LL_DMA_EnableStream(DMA1, LL_DMA_STREAM_3); //Enable DMA Channel for Tx
+    LL_DMA_ClearFlag_TC3(DMA1);
+    LL_DMA_ClearFlag_HT3(DMA1);
+    LL_DMA_ClearFlag_DME3(DMA1);
+    LL_DMA_ClearFlag_FE3(DMA1);
+    LL_DMA_ClearFlag_TE3(DMA1);
+    //Enable DMA stream or channel to start tranmission
+    LL_DMA_EnableStream(DMA1, LL_DMA_STREAM_3); 
 }
 
 void USART_Rx_Check(void) 
 {
-    //Function called on every TC interrupt
-    posRx = ARRAY_LEN(RS485_RxData) - LL_DMA_GetDataLength(DMA1, LL_DMA_CHANNEL_5);
-    //See github tutorial for explanation
+    //Function called on every TC interrupt or IDLE line interrupt
+    posRx = ARRAY_LEN(RS485_RxDataBuf) - LL_DMA_GetDataLength(DMA1, LL_DMA_STREAM_1);
+    
     if (posRx > old_posRx) 
     {                 
-        USART_Process_Data(&RS485_RxData[old_posRx], posRx - old_posRx);
+        //Check if the new position in the buffer is greater than the old (Bad timed packet)
+        USART_Process_Data(&RS485_RxDataBuf[old_posRx], posRx - old_posRx);
         old_posRx = posRx;
     } 
     else if (posRx < old_posRx)
     {
-        USART_Process_Data(&RS485_RxData[old_posRx], ARRAY_LEN(RS485_RxData) - old_posRx);
+        //Check if the new position in the buffer is less than the old (Bad packet)
+        USART_Process_Data(&RS485_RxDataBuf[old_posRx], ARRAY_LEN(RS485_RxDataBuf) - old_posRx);
         old_posRx = posRx;                       
     }
     else if (posRx == 0)
     {
-        //This will be the typical case
-        USART_Process_Data(&RS485_RxData[0], 32);
+        //Check if the new position in the buffer is the same as the old (Good packet)
+        USART_Process_Data(&RS485_RxDataBuf[0], 32); 
         old_posRx = posRx;
     }
 }
 
 void USART_Process_Data(uint8_t* data, size_t len) 
 {
+    memcpy(RS485_RxData, &data, 32);
     newData = true;
 }
 
@@ -152,12 +168,12 @@ void motorControl()
     //Initialize PWM: 3.9ms Period | 256Hz | High DC: 48% | Stop DC: 38% | Low DC: 28%
 
     //Pin Initializations:
-    PwmOut motor1(PA_0);       //Motor: Front Z
-    PwmOut motor2(PA_0);       //Motor: Rear Z
-    PwmOut motor3(PA_0);       //Motor: Front Right
-    PwmOut motor4(PA_0);       //Motor: Front Left
-    PwmOut motor5(PA_0);       //Motor: Back Right
-    PwmOut motor6(PA_0);       //Motor: Back Left
+    PwmOut motor1(PB_7);       //Motor: Front Z
+    PwmOut motor2(PB_6);       //Motor: Rear Z
+    PwmOut motor3(PE_6);       //Motor: Front Right
+    PwmOut motor4(PF_8);       //Motor: Front Left
+    PwmOut motor5(PF_7);       //Motor: Back Right
+    PwmOut motor6(PF_6);       //Motor: Back Left
 
     //Period / Frequency Initializations:
     motor1.period(0.0039);
@@ -306,7 +322,7 @@ void packetParser()
             subtext1[1] = '\0';
             sscanf(subtext1, "%d", &Square);     
 
-            //printf("L1: %d|L2: %d|LeftHatX: %d|LeftHatY: %d|RightHatX: %d|RightHatY: %d|R1: %d|R2: %d|Triangle: %d|Circle: %d|Cross: %d|Square: %d|\n", L1, L2, LeftHatX, LeftHatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square);        
+            newData = false; //Reset new data state
         }
     }
 }
@@ -316,54 +332,49 @@ long map(long x, long in_min, long in_max, long out_min, long out_max)
     return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-void Error_Handler(void)
-{
-    //User can add his own implementation to report the HAL error return state
-    printf("ERROR HANDLER TRIGGERED.\n");
-    __disable_irq();
-    while (1)
-    {
-    }
-}
-
-//Initializations and Config Functions: (Called Once)
+/***INITIALIZATIONS***/
 static void GPIO_Init(void)
 {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    LL_GPIO_InitTypeDef GPIO_InitStruct = {0};
 
     //GPIO Ports Clock Enable
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    __HAL_RCC_GPIOC_CLK_ENABLE();
-    __HAL_RCC_GPIOD_CLK_ENABLE();
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOB);
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOC);
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOD);
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOE);
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOF);
 
     //Configure GPIO pin Output Level
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
 
     //Configure GPIO for on board LED's
-    GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_12|LL_GPIO_PIN_13|LL_GPIO_PIN_14|LL_GPIO_PIN_15;
+    GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+    GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+    GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+    LL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
     //Configure GPIO pins for UART3
-    __HAL_RCC_USART3_CLK_ENABLE();
-    GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+    LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART3);
+    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMA1);
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_8 | LL_GPIO_PIN_9;
+    GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
+    GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+    GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
+    GPIO_InitStruct.Alternate = LL_GPIO_AF_7;
+    LL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-    //Setup PA_0 for TIM2 PWM
-    /*__HAL_RCC_GPIOA_CLK_ENABLE();
-    GPIO_InitStruct.Pin = GPIO_PIN_0;
+    //Setup PWM Pins NOT SURE IF NEEDED
+   /* __HAL_RCC_TIM2_CLK_ENABLE();
+    GPIO_InitStruct.Pin = GPIO_PIN_7|GPIO_PIN_6;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF1_TIM2;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);*/
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);*/
 }
 
 void SystemClock_Config(void)
@@ -371,13 +382,12 @@ void SystemClock_Config(void)
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};
     RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-    /** Configure the main internal regulator output voltage
-    */
+    // Configure the main internal regulator output voltage
+    
     __HAL_RCC_PWR_CLK_ENABLE();
     __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
-    /** Initializes the RCC Oscillators according to the specified parameters
-    * in the RCC_OscInitTypeDef structure.
-    */
+    // Initializes the RCC Oscillators according to the specified parameters
+    // in the RCC_OscInitTypeDef structure.
     RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
     RCC_OscInitStruct.HSEState = RCC_HSE_ON;
     RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -390,8 +400,8 @@ void SystemClock_Config(void)
     {
     Error_Handler();
     }
-    /** Initializes the CPU, AHB and APB buses clocks
-    */
+    // Initializes the CPU, AHB and APB buses clocks
+    
     RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                                 |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
     RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
@@ -407,30 +417,32 @@ void SystemClock_Config(void)
 
 static void USART2_UART_Init(void)
 {
-  huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
-  huart2.Init.WordLength = UART_WORDLENGTH_8B;
-  huart2.Init.StopBits = UART_STOPBITS_1;
-  huart2.Init.Parity = UART_PARITY_NONE;
-  huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
+    //Initialize USART2 for Serial Monitor (Using HAL, will switch to LL)
+    huart2.Instance = USART2;
+    huart2.Init.BaudRate = 115200;
+    huart2.Init.WordLength = UART_WORDLENGTH_8B;
+    huart2.Init.StopBits = UART_STOPBITS_1;
+    huart2.Init.Parity = UART_PARITY_NONE;
+    huart2.Init.Mode = UART_MODE_TX_RX;
+    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart2) != HAL_OK)
+    {
+        Error_Handler();
+    }
 }
 
 static void USART3_UART_Init(void)
 {
-        LL_USART_InitTypeDef USART_InitStruct = {0};
-
+    //Initialize USART3 for DMA Rx and Tx
+    LL_USART_InitTypeDef USART_InitStruct = {0};
+    
     //Peripheral clock enable
     LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART3);
     LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOD);
     LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMA1);
 
-    //USART3 DMA init for Stream 1 Channel 4 = Rx
+    //USART3 DMA Init for Rx
     LL_DMA_SetChannelSelection(DMA1, LL_DMA_STREAM_1, LL_DMA_CHANNEL_4);
     LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_STREAM_1, LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
     LL_DMA_SetStreamPriorityLevel(DMA1, LL_DMA_STREAM_1, LL_DMA_PRIORITY_LOW);
@@ -440,19 +452,16 @@ static void USART3_UART_Init(void)
     LL_DMA_SetPeriphSize(DMA1, LL_DMA_STREAM_1, LL_DMA_PDATAALIGN_BYTE);
     LL_DMA_SetMemorySize(DMA1, LL_DMA_STREAM_1, LL_DMA_MDATAALIGN_BYTE);
     LL_DMA_DisableFifoMode(DMA1, LL_DMA_STREAM_1);
-
     LL_DMA_SetPeriphAddress(DMA1, LL_DMA_STREAM_1, LL_USART_DMA_GetRegAddr(USART3));
-    LL_DMA_SetMemoryAddress(DMA1, LL_DMA_STREAM_1, (uint32_t)RS485_RxData);
-    LL_DMA_SetDataLength(DMA1, LL_DMA_STREAM_1, ARRAY_LEN(RS485_RxData));
+    LL_DMA_SetMemoryAddress(DMA1, LL_DMA_STREAM_1, (uint32_t)RS485_RxDataBuf);
+    LL_DMA_SetDataLength(DMA1, LL_DMA_STREAM_1, ARRAY_LEN(RS485_RxDataBuf));
 
-    /* Enable HT & TC interrupts */
-    LL_DMA_EnableIT_HT(DMA1, LL_DMA_STREAM_1);
+    //DMA interrupt init for Rx
     LL_DMA_EnableIT_TC(DMA1, LL_DMA_STREAM_1);
-
-    /* DMA interrupt init */
     NVIC_SetPriority(DMA1_Stream1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
     NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 
+    //USART3 DMA Init for Tx (Some setup performed in transmit function)
     LL_DMA_SetChannelSelection(DMA1, LL_DMA_STREAM_3, LL_DMA_CHANNEL_4);
     LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_STREAM_3, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
     LL_DMA_SetStreamPriorityLevel(DMA1, LL_DMA_STREAM_3, LL_DMA_PRIORITY_LOW);
@@ -464,14 +473,12 @@ static void USART3_UART_Init(void)
     LL_DMA_DisableFifoMode(DMA1, LL_DMA_STREAM_3);
     LL_DMA_SetPeriphAddress(DMA1, LL_DMA_STREAM_3, LL_USART_DMA_GetRegAddr(USART3));
 
-    /* Enable TC interrupt */
+    //DMA interrupt init for Tx
     LL_DMA_EnableIT_TC(DMA1, LL_DMA_STREAM_3);
-
-    /* DMA interrupt init */
-    NVIC_SetPriority(DMA1_Stream3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 5, 0));
+    NVIC_SetPriority(DMA1_Stream3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
     NVIC_EnableIRQ(DMA1_Stream3_IRQn);
 
-    /* USART configuration */
+    //USART Config (Tx done in DMA transmit function)
     USART_InitStruct.BaudRate = 115200;
     USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
     USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
@@ -482,42 +489,51 @@ static void USART3_UART_Init(void)
     LL_USART_Init(USART3, &USART_InitStruct);
     LL_USART_ConfigAsyncMode(USART3);
     LL_USART_EnableDMAReq_RX(USART3);
-    //LL_USART_EnableDMAReq_TX(USART3);
     LL_USART_EnableIT_IDLE(USART3);
 
-    /* USART interrupt */
+    //USART interrupt init 
     NVIC_SetPriority(USART3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
     NVIC_EnableIRQ(USART3_IRQn);
 
-    /* Enable USART and DMA */
+    //Enable USART3 and DMA Rx Stream 
     LL_DMA_EnableStream(DMA1, LL_DMA_STREAM_1);
     LL_USART_Enable(USART3);
 }
 
+/***INTERRUPT HANDLERS***/
 void DMA1_Stream1_IRQHandler(void) 
 {
-    /* Check transfer-complete interrupt */
-    if (LL_DMA_IsEnabledIT_TC(DMA1, LL_DMA_STREAM_1) && LL_DMA_IsActiveFlag_TC1(DMA1)) {
-        LL_DMA_ClearFlag_TC1(DMA1);             /* Clear transfer complete flag */
-        USART_Rx_Check();                       /* Check for data to process */
+    // Check transfer-complete interrupt for Rx
+    if (LL_DMA_IsEnabledIT_TC(DMA1, LL_DMA_STREAM_1) && LL_DMA_IsActiveFlag_TC1(DMA1)) 
+    {
+        LL_DMA_ClearFlag_TC1(DMA1);             //Clear transfer complete flag 
+        USART_Rx_Check();                       //Filter received data
     }
 }
 
 void DMA1_Stream3_IRQHandler(void) 
 {
-    /* Check transfer-complete interrupt */
+    //Check transfer-complete interrupt for Tx
     if (LL_DMA_IsEnabledIT_TC(DMA1, LL_DMA_STREAM_3) && LL_DMA_IsActiveFlag_TC3(DMA1)) {
-        LL_DMA_ClearFlag_TC3(DMA1);             /* Clear transfer complete flag */
-        USART3_DMA1_Start_Transmit();                      /* Check for data to process */
+        LL_DMA_ClearFlag_TC3(DMA1);             //Clear transfer complete flag
+        DMA_Start_Transmit();           //Send more data
     }
 }
 
 void USART3_IRQHandler(void) 
 {
-    /* Check for IDLE line interrupt */
-    if (LL_USART_IsEnabledIT_IDLE(USART3) && LL_USART_IsActiveFlag_IDLE(USART3)) 
+    //Check idle line interrupt for USART
+    if (LL_USART_IsEnabledIT_IDLE(USART3) && LL_USART_IsActiveFlag_IDLE(USART3)) {
+        LL_USART_ClearFlag_IDLE(USART3);        //Clear IDLE line Flag
+        USART_Rx_Check();                       //Filter received data
+    }
+}
+
+void Error_Handler(void)
+{
+    //User can add his own implementation to report the HAL error return state
+    __disable_irq();
+    while (1)
     {
-        LL_USART_ClearFlag_IDLE(USART3);        /* Clear IDLE line flag */
-        USART_Rx_Check();                      /* Check for data to process */
     }
 }
