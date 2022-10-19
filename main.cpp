@@ -1,6 +1,6 @@
 /* Walrus ROV
  * STM32F4 ROV 
- * 28/09/2022
+ * /09/2022
  * Alexander, Tony, Clinton
  *
  * PS3 Controls Packet Format: 
@@ -80,15 +80,15 @@ int main()
     USART3_UART_Init();         //Initialize UART3 for RS485 Coms
     
     motorControlThread.start(motorControl);     //Start Motor Control (Init's as OFF)
-    nRF24Thread.start(nRF24);                   //Start Rx and Tx for Wireless Packets
     packetParserThread.start(packetParser);     //Start Parsing of Received Wireless Packets 
+    nRF24Thread.start(nRF24);                   //Start Rx and Tx for Wireless Packets
     
     DMA_Start_Transmit();               //Start DMA Transmission on UART3 for RS485
 
     while(1)
     {
         LL_GPIO_TogglePin(GPIOD, LL_GPIO_PIN_12);
-        HAL_Delay(500);
+        HAL_Delay(1000);
         
         printf("Raw Data: %s\n", RS485_RxDataBuf);
         printf("Filtered Data: %s\n", RS485_RxData);
@@ -166,7 +166,10 @@ void motorControl()
 {
     //Thread that control PWM signal outputs within parameters below, uses global parsed data
     //Initialize PWM: 3.9ms Period | 256Hz | High DC: 48% | Stop DC: 38% | Low DC: 28%
-
+    uint8_t maxPowa = 41;
+    uint8_t minPowa = 35;
+    uint8_t stopPowa = 38;
+    
     //Pin Initializations:
     PwmOut motor1(PB_7);       //Motor: Front Z
     PwmOut motor2(PB_6);       //Motor: Rear Z
@@ -197,8 +200,8 @@ void motorControl()
         if (LeftHatY > 115 && LeftHatY < 255)
         {
             //Move Forward (motor 5 and motor 6: 48% > DC > 38%)
-            motor5DC = (float)(map(LeftHatY, 255, 0, 28, 48))/100.0;
-            motor6DC = (float)(map(LeftHatY, 255, 0, 28, 48))/100.0;
+            motor5DC = (float)(map(LeftHatY, 255, 0, minPowa, maxPowa))/100.0;
+            motor6DC = (float)(map(LeftHatY, 255, 0, minPowa, maxPowa))/100.0;
 
             motor5.write(motor5DC);
             motor6.write(motor6DC);
@@ -206,8 +209,8 @@ void motorControl()
         else if (LeftHatY < 110 && LeftHatY > 0)
         {
             //Move Backwards: (motor 5 and motor 6: 38% > DC > 28%)
-            motor5DC = (float)(map(LeftHatY, 255, 0, 28, 48))/100.0;
-            motor6DC = (float)(map(LeftHatY, 255, 0, 28, 48))/100.0;
+            motor5DC = (float)(map(LeftHatY, 255, 0, minPowa, maxPowa))/100.0;
+            motor6DC = (float)(map(LeftHatY, 255, 0, minPowa, maxPowa))/100.0;
 
             motor5.write(motor5DC);
             motor6.write(motor6DC);
@@ -215,8 +218,8 @@ void motorControl()
         else if (LeftHatX < 130 && LeftHatX > 0)
         {
             //Move Left: (motor 5 and motor 3: 48% > DC > 38%)
-            motor5DC = (float)(map(LeftHatX, 255, 0, 28, 48))/100.0;
-            motor3DC = (float)(map(LeftHatX, 255, 0, 28, 48))/100.0;
+            motor5DC = (float)(map(LeftHatX, 255, 0, minPowa, maxPowa))/100.0;
+            motor3DC = (float)(map(LeftHatX, 255, 0, minPowa, maxPowa))/100.0;
 
             motor5.write(motor5DC);
             motor3.write(motor3DC);
@@ -224,8 +227,8 @@ void motorControl()
         else if (LeftHatX > 140 && LeftHatX < 255)
         {
             //Move Right: (motor 6 and motor 4: 48% > DC > 38%)
-            motor6DC = (float)(map(LeftHatX, 255, 0, 28, 48))/100.0;
-            motor4DC = (float)(map(LeftHatX, 255, 0, 28, 48))/100.0;
+            motor6DC = (float)(map(LeftHatX, 255, 0, minPowa, maxPowa))/100.0;
+            motor4DC = (float)(map(LeftHatX, 255, 0, minPowa, maxPowa))/100.0;
 
             motor6.write(motor6DC);
             motor4.write(motor4DC);
@@ -234,8 +237,8 @@ void motorControl()
         else if (L1 > 10 && L1 < 255)
         {
             //Move Up (motor 1 and motor 2: 38% > DC > 48%)
-            motor1DC = (float)(map(L1, 0, 255, 38, 48))/100.0;
-            motor2DC = (float)(map(L1, 0, 255, 38, 48))/100.0;
+            motor1DC = (float)(map(L1, 0, 255, stopPowa, maxPowa))/100.0;
+            motor2DC = (float)(map(L1, 0, 255, stopPowa, maxPowa))/100.0;
 
             motor1.write(motor1DC);
             motor2.write(motor2DC);
@@ -243,8 +246,8 @@ void motorControl()
         else if (L2 > 10 && L2 < 255)
         {
             //Move Down (motor 1 and motor 2: 28% > DC > 38%)
-            motor1DC = (float)(map(L2, 0, 255, 38, 28))/100.0;
-            motor2DC = (float)(map(L2, 0, 255, 38, 28))/100.0;
+            motor1DC = (float)(map(L2, 0, 255, stopPowa, minPowa))/100.0;
+            motor2DC = (float)(map(L2, 0, 255, stopPowa, minPowa))/100.0;
 
             motor1.write(motor1DC);
             motor2.write(motor2DC);
@@ -252,12 +255,12 @@ void motorControl()
         else
         {
             //Idle mode
-            motor1.write(38.0);
-            motor2.write(38.0);
-            motor3.write(38.0);
-            motor4.write(38.0);
-            motor5.write(38.0);
-            motor6.write(38.0);
+            motor1.write(stopPowa);
+            motor2.write(stopPowa);
+            motor3.write(stopPowa);
+            motor4.write(stopPowa);
+            motor5.write(stopPowa);
+            motor6.write(stopPowa);
         }
     }
 }
