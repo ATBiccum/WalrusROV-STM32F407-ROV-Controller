@@ -42,7 +42,6 @@ UART_HandleTypeDef huart2; //Serial Monitor
 
 Thread packetParserThread; //Thread to parse packets into below variables
 Thread motorControlThread; //Thread that takes parsed packet data and maps to DC for motors 
-Thread nRF24Thread;        //Thread that handles data reception from transceivers 
 
 //Packet from Control Station Parsed Variables
 int L1;
@@ -81,9 +80,8 @@ int main()
     
     motorControlThread.start(motorControl);     //Start Motor Control (Init's as OFF)
     packetParserThread.start(packetParser);     //Start Parsing of Received Wireless Packets 
-    nRF24Thread.start(nRF24);                   //Start Rx and Tx for Wireless Packets
-    
-    DMA_Start_Transmit();               //Start DMA Transmission on UART3 for RS485
+
+    DMA_Start_Transmit();        //Start DMA Transmission on UART3 for RS485
 
     while(1)
     {
@@ -171,12 +169,19 @@ void motorControl()
     uint8_t stopPowa = 38;
     
     //Pin Initializations:
-    PwmOut motor1(PB_7);       //Motor: Front Z
-    PwmOut motor2(PB_6);       //Motor: Rear Z
-    PwmOut motor3(PE_6);       //Motor: Front Right
-    PwmOut motor4(PF_8);       //Motor: Front Left
-    PwmOut motor5(PF_7);       //Motor: Back Right
-    PwmOut motor6(PF_6);       //Motor: Back Left
+    //PwmOut motor1(PB_7);       //Motor: Front Z
+    //PwmOut motor2(PB_6);       //Motor: Rear Z
+    //PwmOut motor3(PE_6);       //Motor: Front Right
+    //PwmOut motor4(PF_8);       //Motor: Front Left
+    //PwmOut motor5(PF_7);       //Motor: Back Right
+    //PwmOut motor6(PF_6);       //Motor: Back Left
+    
+    PwmOut motor1(PA_0);       //Motor: Front Z
+    PwmOut motor2(PA_1);       //Motor: Rear Z
+    PwmOut motor3(PA_5);       //Motor: Front Right
+    PwmOut motor4(PA_7);       //Motor: Front Left
+    PwmOut motor5(PA_8);       //Motor: Back Right
+    PwmOut motor6(PA_9);       //Motor: Back Left
 
     //Period / Frequency Initializations:
     motor1.period(0.0039);
@@ -370,14 +375,15 @@ static void GPIO_Init(void)
     GPIO_InitStruct.Alternate = LL_GPIO_AF_7;
     LL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-    //Setup PWM Pins NOT SURE IF NEEDED
-   /* __HAL_RCC_TIM2_CLK_ENABLE();
-    GPIO_InitStruct.Pin = GPIO_PIN_7|GPIO_PIN_6;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Alternate = GPIO_AF1_TIM2;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);*/
+    LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_TIM1); //Pins PA_7, PA_8, PA_9 are for TIM1
+    LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM2); //Pins PA_0, PA_1, PA_5 are for TIM2
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_0|LL_GPIO_PIN_1|LL_GPIO_PIN_5|LL_GPIO_PIN_7|LL_GPIO_PIN_8|LL_GPIO_PIN_9;
+    GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
+    GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+    GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
+    GPIO_InitStruct.Alternate = LL_GPIO_AF_1;
+    LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 }
 
 void SystemClock_Config(void)

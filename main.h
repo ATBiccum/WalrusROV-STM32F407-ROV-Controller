@@ -26,7 +26,6 @@ static void USART3_UART_Init(void);
 
 //Active Functions
 long map(long x, long in_min, long in_max, long out_min, long out_max);
-void nRF24(); //Operates in its own thread
 void packetParser(); //Operates in its own thread
 void Error_Handler(void);
 void motorControl();
