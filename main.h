@@ -29,8 +29,7 @@ long map(long x, long in_min, long in_max, long out_min, long out_max);
 void packetParser(); //Operates in its own thread
 void Error_Handler(void);
 void motorControl();
-void USART_Rx_Check(void);
-void USART_Process_Data(uint8_t* data, size_t len);
+void USART_Process_Data();
 void DMA_Start_Transmit(void);
 
 //Interrupt Handlers

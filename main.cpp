@@ -43,6 +43,29 @@ UART_HandleTypeDef huart2; //Serial Monitor
 Thread packetParserThread; //Thread to parse packets into below variables
 Thread motorControlThread; //Thread that takes parsed packet data and maps to DC for motors 
 
+PwmOut motor1(PA_0);       //Motor: Front Z yes
+PwmOut motor2(PA_1);       //Motor: Rear Z yes
+PwmOut motor3(PA_5);       //Motor: Front Right yes
+PwmOut motor4(PA_7);       //Motor: Front Left yes
+PwmOut motor5(PB_5);       //Motor: Back Right no
+PwmOut motor6(PB_3);       //Motor: Back Left no
+
+    float motor1DC = 0.0; 
+    float motor2DC = 0.0;
+    float motor3DC = 0.0;
+    float motor4DC = 0.0;
+    float motor5DC = 0.0;
+    float motor6DC = 0.0;
+
+
+//Pin Initializations:
+//PwmOut motor1(PB_7);       //Motor: Front Z
+//PwmOut motor2(PB_6);       //Motor: Rear Z
+//PwmOut motor3(PE_6);       //Motor: Front Right
+//PwmOut motor4(PF_8);       //Motor: Front Left
+//PwmOut motor5(PF_7);       //Motor: Back Right
+//PwmOut motor6(PF_6);       //Motor: Back Left
+
 //Packet from Control Station Parsed Variables
 int L1;
 int L2;
@@ -59,15 +82,11 @@ int Square;
 
 //RS485 Tx and Rx Variables
 uint8_t RS485_RxDataBuf[32] = {0};
-uint8_t RS485_RxData[32] = {0};                              //"#99RANDOMSENSORDATABABYOHYA999"
-uint8_t RS485_TxData[32] = "#99RANDOMSENSORDATABABYOHYA999"; //"#99000000134111154132000000999"
+uint8_t RS485_RxData[32] = {0};                              //"#99RANDOMSENSORDATABABYOHYA999#"
+uint8_t RS485_TxData[32] = "#99RANDOMSENSORDATABABYOHYA999#"; //"#99000000134111154132000000999#"
 size_t old_posRx;
 size_t posRx;
 bool newData = false;
-
-//Packet Parsing Buffers 
-char subtext3[4];   //3 Digit Buffer
-char subtext1[2];   //1 Digit Buffer
 
 int main()
 {
@@ -76,33 +95,21 @@ int main()
     SystemClock_Config();       //Initialize Clocks 
     GPIO_Init();                //Initialize all GPIO Pins for Periph's and Outputs
     USART2_UART_Init();         //Initialize UART2 for the Serial Monitor
-    USART3_UART_Init();         //Initialize UART3 for RS485 Coms
     
     motorControlThread.start(motorControl);     //Start Motor Control (Init's as OFF)
     packetParserThread.start(packetParser);     //Start Parsing of Received Wireless Packets 
 
+    thread_sleep_for(1000);
+    USART3_UART_Init();         //Initialize UART3 for RS485 Coms
     DMA_Start_Transmit();        //Start DMA Transmission on UART3 for RS485
 
     while(1)
     {
         LL_GPIO_TogglePin(GPIOD, LL_GPIO_PIN_12);
-        HAL_Delay(1000);
-        
-        printf("Raw Data: %s\n", RS485_RxDataBuf);
-        printf("Filtered Data: %s\n", RS485_RxData);
-        printf("L1: %d|L2: %d|LeftHatX: %d|LeftHatY: %d|RightHatX: %d|RightHatY: %d|R1: %d|R2: %d|Triangle: %d|Circle: %d|Cross: %d|Square: %d|\n", L1, L2, LeftHatX, LeftHatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square);
-        
-       //Polling USART Transmit with DMA Debugging:
-        /*for (int i = 0; i < 33; i++)
-        {
-            HAL_Delay(1);
-            LL_USART_TransmitData8( USART1, RS485_TxData[i]);
-        }*/
-        //printf("DMA Buffer: %s\n", RS485_RxDataBuf); //DMA Buffer
-        //uint8_t length = LL_DMA_GetDataLength(DMA1, LL_DMA_STREAM_3);
-        //printf("Tx Length: %d\n", length);
-        //uint8_t len2 = LL_DMA_GetDataLength(DMA1, LL_DMA_STREAM_1);
-        //printf("Rx Length: %d\n", len2);
+        thread_sleep_for(100);
+
+        printf("Data:%s|L1:%d|L2:%d|LeftHatX:%d|LeftHatY:%d|RightHatX:%d|RightHatY:%d|R1:%d|R2:%d|Triangle:%d|Circle:%d|Cross:%d|Square:%d|\n", RS485_RxDataBuf, L1, L2, LeftHatX, LeftHatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square);
+        //printf("Data:%s|M1:%d|M2:%d|M3:%d|M4:%d|M5:%d|M6:%d\n", RS485_RxDataBuf, (int)motor1DC, (int)motor2DC, (int)motor3DC, (int)motor4DC, (int)motor5DC, (int)motor6DC);
     }
 }
 
@@ -121,67 +128,100 @@ void DMA_Start_Transmit(void)
     LL_USART_EnableDirectionTx(USART3); //Not sure if needed 
     //Clear all flags
     LL_DMA_ClearFlag_TC3(DMA1);
-    LL_DMA_ClearFlag_HT3(DMA1);
-    LL_DMA_ClearFlag_DME3(DMA1);
-    LL_DMA_ClearFlag_FE3(DMA1);
     LL_DMA_ClearFlag_TE3(DMA1);
     //Enable DMA stream or channel to start tranmission
     LL_DMA_EnableStream(DMA1, LL_DMA_STREAM_3); 
 }
 
-void USART_Rx_Check(void) 
+void USART_Process_Data() 
 {
-    //Function called on every TC interrupt or IDLE line interrupt
-    posRx = ARRAY_LEN(RS485_RxDataBuf) - LL_DMA_GetDataLength(DMA1, LL_DMA_STREAM_1);
-    
-    if (posRx > old_posRx) 
-    {                 
-        //Check if the new position in the buffer is greater than the old (Bad timed packet)
-        USART_Process_Data(&RS485_RxDataBuf[old_posRx], posRx - old_posRx);
-        old_posRx = posRx;
-    } 
-    else if (posRx < old_posRx)
+    //Check sum will go here before newData is set to true
+    memcpy(RS485_RxData, &RS485_RxDataBuf, 32);
+    if(RS485_RxData[0]=='#')
     {
-        //Check if the new position in the buffer is less than the old (Bad packet)
-        USART_Process_Data(&RS485_RxDataBuf[old_posRx], ARRAY_LEN(RS485_RxDataBuf) - old_posRx);
-        old_posRx = posRx;                       
-    }
-    else if (posRx == 0)
-    {
-        //Check if the new position in the buffer is the same as the old (Good packet)
-        USART_Process_Data(&RS485_RxDataBuf[0], 32); 
-        old_posRx = posRx;
+        newData = true; //Parse a packet
     }
 }
 
-void USART_Process_Data(uint8_t* data, size_t len) 
+void packetParser()
 {
-    memcpy(RS485_RxData, &data, 32);
-    newData = true;
+    //This thread runs continuously checking is newData bool is true. 
+    //If so; performs a single parse and resets newData variable.
+
+    //Packet Parsing Buffers 
+    char subtext3[4];   //3 Digit Buffer
+    char subtext1[2];   //1 Digit Buffer
+    uint8_t parseBuffer[32] = {0};
+    while(1)
+    {
+        //"#99000000134111154132000000999#"
+        if(newData)
+        {
+            memcpy(parseBuffer, &RS485_RxData, 32);
+
+            memcpy(subtext3, &parseBuffer[3], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &L1);
+            //L2
+            memcpy(subtext3, &parseBuffer[6], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &L2);
+            //LeftHatX
+            memcpy(subtext3, &parseBuffer[9], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &LeftHatX);
+            //LeftHatY
+            memcpy(subtext3, &parseBuffer[12], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &LeftHatY);
+            //RightHatX
+            memcpy(subtext3, &parseBuffer[15], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &RightHatX);
+            //RightHatY
+            memcpy(subtext3, &parseBuffer[18], 3);
+            subtext3[3] = '\0';
+            sscanf(subtext3, "%d", &RightHatY);
+            //R1
+            memcpy(subtext1, &parseBuffer[19], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &R1);
+            //R2
+            memcpy(subtext1, &parseBuffer[20], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &R2);
+            //Triangle
+            memcpy(subtext1, &parseBuffer[21], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &Triangle);
+            //Circle
+            memcpy(subtext1, &parseBuffer[22], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &Circle);           
+            //Cross
+            memcpy(subtext1, &parseBuffer[23], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &Cross);
+            //Square
+            memcpy(subtext1, &parseBuffer[24], 1);
+            subtext1[1] = '\0';
+            sscanf(subtext1, "%d", &Square);     
+
+            newData = false; //Reset new data state
+        }
+    }
 }
 
 void motorControl()
 {
     //Thread that control PWM signal outputs within parameters below, uses global parsed data
     //Initialize PWM: 3.9ms Period | 256Hz | High DC: 48% | Stop DC: 38% | Low DC: 28%
-    uint8_t maxPowa = 41;
-    uint8_t minPowa = 35;
-    uint8_t stopPowa = 38;
-    
-    //Pin Initializations:
-    //PwmOut motor1(PB_7);       //Motor: Front Z
-    //PwmOut motor2(PB_6);       //Motor: Rear Z
-    //PwmOut motor3(PE_6);       //Motor: Front Right
-    //PwmOut motor4(PF_8);       //Motor: Front Left
-    //PwmOut motor5(PF_7);       //Motor: Back Right
-    //PwmOut motor6(PF_6);       //Motor: Back Left
-    
-    PwmOut motor1(PA_0);       //Motor: Front Z
-    PwmOut motor2(PA_1);       //Motor: Rear Z
-    PwmOut motor3(PA_5);       //Motor: Front Right
-    PwmOut motor4(PA_7);       //Motor: Front Left
-    PwmOut motor5(PA_8);       //Motor: Back Right
-    PwmOut motor6(PA_9);       //Motor: Back Left
+    float maxPowa = 41.0;
+    float minPowa = 35.0;
+    float stopPowa = 38.0;
+    //float maxPowa = 48.0;
+    //float minPowa = 28.0;
+    //float stopPowa = 38.0;
 
     //Period / Frequency Initializations:
     motor1.period(0.0039);
@@ -191,55 +231,59 @@ void motorControl()
     motor5.period(0.0039);
     motor6.period(0.0039);
 
-    float motor1DC; 
-    float motor2DC;
-    float motor3DC;
-    float motor4DC;
-    float motor5DC;
-    float motor6DC;
-
+    motor1.write(stopPowa/100.0);
+    motor2.write(stopPowa/100.0);
+    motor3.write(stopPowa/100.0);
+    motor4.write(stopPowa/100.0);
+    motor5.write(stopPowa/100.0);
+    motor6.write(stopPowa/100.0);
+    
+    thread_sleep_for(10000);
+    printf("ESC's Initialized!\n");
+    
     while (1)
     {
         //Motor control loop; deadzone programmed with < > values; only ever 2 motors on at once
         //If none of these conditions are met, returns all motors to off PWM of 38%
-        if (LeftHatY > 115 && LeftHatY < 255)
+        thread_sleep_for(10);
+        if (LeftHatY < 115)
         {
             //Move Forward (motor 5 and motor 6: 48% > DC > 38%)
-            motor5DC = (float)(map(LeftHatY, 255, 0, minPowa, maxPowa))/100.0;
-            motor6DC = (float)(map(LeftHatY, 255, 0, minPowa, maxPowa))/100.0;
+            motor5DC = (float)(map(LeftHatY, 115, 0, stopPowa, maxPowa))/100.0; 
+            motor6DC = (float)(map(LeftHatY, 115, 0, stopPowa, maxPowa))/100.0;
 
             motor5.write(motor5DC);
             motor6.write(motor6DC);
         }
-        else if (LeftHatY < 110 && LeftHatY > 0)
+        else if (LeftHatY > 115)
         {
             //Move Backwards: (motor 5 and motor 6: 38% > DC > 28%)
-            motor5DC = (float)(map(LeftHatY, 255, 0, minPowa, maxPowa))/100.0;
-            motor6DC = (float)(map(LeftHatY, 255, 0, minPowa, maxPowa))/100.0;
+            motor5DC = (float)(map(LeftHatY, 255, 115, stopPowa, maxPowa))/100.0;
+            motor6DC = (float)(map(LeftHatY, 255, 115, stopPowa, maxPowa))/100.0;
 
             motor5.write(motor5DC);
             motor6.write(motor6DC);
         }
-        else if (LeftHatX < 130 && LeftHatX > 0)
+        else if (LeftHatX < 130)
         {
             //Move Left: (motor 5 and motor 3: 48% > DC > 38%)
-            motor5DC = (float)(map(LeftHatX, 255, 0, minPowa, maxPowa))/100.0;
-            motor3DC = (float)(map(LeftHatX, 255, 0, minPowa, maxPowa))/100.0;
+            motor5DC = (float)(map(LeftHatX, 130, 0, stopPowa, maxPowa))/100.0;
+            motor3DC = (float)(map(LeftHatX, 130, 0, stopPowa, maxPowa))/100.0;
 
             motor5.write(motor5DC);
             motor3.write(motor3DC);
         }
-        else if (LeftHatX > 140 && LeftHatX < 255)
+        else if (LeftHatX > 140)
         {
             //Move Right: (motor 6 and motor 4: 48% > DC > 38%)
-            motor6DC = (float)(map(LeftHatX, 255, 0, minPowa, maxPowa))/100.0;
-            motor4DC = (float)(map(LeftHatX, 255, 0, minPowa, maxPowa))/100.0;
+            motor6DC = (float)(map(LeftHatX, 140, 255, stopPowa, maxPowa))/100.0;
+            motor4DC = (float)(map(LeftHatX, 140, 255, stopPowa, maxPowa))/100.0;
 
             motor6.write(motor6DC);
             motor4.write(motor4DC);
 
         }
-        else if (L1 > 10 && L1 < 255)
+        if (L1 > 0)
         {
             //Move Up (motor 1 and motor 2: 38% > DC > 48%)
             motor1DC = (float)(map(L1, 0, 255, stopPowa, maxPowa))/100.0;
@@ -248,7 +292,7 @@ void motorControl()
             motor1.write(motor1DC);
             motor2.write(motor2DC);
         }
-        else if (L2 > 10 && L2 < 255)
+        else if (L2 > 0)
         {
             //Move Down (motor 1 and motor 2: 28% > DC > 38%)
             motor1DC = (float)(map(L2, 0, 255, stopPowa, minPowa))/100.0;
@@ -260,77 +304,12 @@ void motorControl()
         else
         {
             //Idle mode
-            motor1.write(stopPowa);
-            motor2.write(stopPowa);
-            motor3.write(stopPowa);
-            motor4.write(stopPowa);
-            motor5.write(stopPowa);
-            motor6.write(stopPowa);
-        }
-    }
-}
-
-void packetParser()
-{
-    while(1)
-    {
-        if (newData == true)
-        {
-            memcpy(subtext3, &RS485_RxData[1], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &L1);
-            L1 = map(L1, 0, 255, 27, 48);
-            //L2
-            memcpy(subtext3, &RS485_RxData[4], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &L2);
-            L2 = map(L2, 0, 255, 27, 48);
-            //LeftHatX
-            memcpy(subtext3, &RS485_RxData[7], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &LeftHatX);
-            LeftHatX = map(LeftHatX, 255, 0, 27, 48);
-            //LeftHatY
-            memcpy(subtext3, &RS485_RxData[10], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &LeftHatY);
-            LeftHatY = map(LeftHatY, 255, 0, 27, 48);
-            //RightHatX
-            memcpy(subtext3, &RS485_RxData[13], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &RightHatX);
-            RightHatX = map(RightHatX, 255, 0, 27, 48);
-            //RightHatY
-            memcpy(subtext3, &RS485_RxData[16], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &RightHatY);
-            RightHatY = map(RightHatY, 255, 0, 27, 48);
-            //R1
-            memcpy(subtext1, &RS485_RxData[19], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &R1);
-            //R2
-            memcpy(subtext1, &RS485_RxData[20], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &R2);
-            //Triangle
-            memcpy(subtext1, &RS485_RxData[21], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &Triangle);
-            //Circle
-            memcpy(subtext1, &RS485_RxData[22], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &Circle);           
-            //Cross
-            memcpy(subtext1, &RS485_RxData[23], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &Cross);
-            //Square
-            memcpy(subtext1, &RS485_RxData[24], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &Square);     
-
-            newData = false; //Reset new data state
+            motor1.write(stopPowa/100.0);
+            motor2.write(stopPowa/100.0);
+            motor3.write(stopPowa/100.0);
+            motor4.write(stopPowa/100.0);
+            motor5.write(stopPowa/100.0);
+            motor6.write(stopPowa/100.0);
         }
     }
 }
@@ -375,15 +354,8 @@ static void GPIO_Init(void)
     GPIO_InitStruct.Alternate = LL_GPIO_AF_7;
     LL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-    LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_TIM1); //Pins PA_7, PA_8, PA_9 are for TIM1
-    LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM2); //Pins PA_0, PA_1, PA_5 are for TIM2
-    GPIO_InitStruct.Pin = LL_GPIO_PIN_0|LL_GPIO_PIN_1|LL_GPIO_PIN_5|LL_GPIO_PIN_7|LL_GPIO_PIN_8|LL_GPIO_PIN_9;
-    GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
-    GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-    GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
-    GPIO_InitStruct.Alternate = LL_GPIO_AF_1;
-    LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_TIM1);
+    LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM2); 
 }
 
 void SystemClock_Config(void)
@@ -470,6 +442,7 @@ static void USART3_UART_Init(void)
     NVIC_SetPriority(DMA1_Stream1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
     NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 
+
     //USART3 DMA Init for Tx (Some setup performed in transmit function)
     LL_DMA_SetChannelSelection(DMA1, LL_DMA_STREAM_3, LL_DMA_CHANNEL_4);
     LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_STREAM_3, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
@@ -484,11 +457,11 @@ static void USART3_UART_Init(void)
 
     //DMA interrupt init for Tx
     LL_DMA_EnableIT_TC(DMA1, LL_DMA_STREAM_3);
-    NVIC_SetPriority(DMA1_Stream3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
+    NVIC_SetPriority(DMA1_Stream3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 1));
     NVIC_EnableIRQ(DMA1_Stream3_IRQn);
 
     //USART Config (Tx done in DMA transmit function)
-    USART_InitStruct.BaudRate = 115200;
+    USART_InitStruct.BaudRate = 2500000;
     USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
     USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
     USART_InitStruct.Parity = LL_USART_PARITY_NONE;
@@ -516,7 +489,7 @@ void DMA1_Stream1_IRQHandler(void)
     if (LL_DMA_IsEnabledIT_TC(DMA1, LL_DMA_STREAM_1) && LL_DMA_IsActiveFlag_TC1(DMA1)) 
     {
         LL_DMA_ClearFlag_TC1(DMA1);             //Clear transfer complete flag 
-        USART_Rx_Check();                       //Filter received data
+        USART_Process_Data();                       //Filter received data
     }
 }
 
@@ -532,9 +505,10 @@ void DMA1_Stream3_IRQHandler(void)
 void USART3_IRQHandler(void) 
 {
     //Check idle line interrupt for USART
-    if (LL_USART_IsEnabledIT_IDLE(USART3) && LL_USART_IsActiveFlag_IDLE(USART3)) {
+    if (LL_USART_IsEnabledIT_IDLE(USART3) && LL_USART_IsActiveFlag_IDLE(USART3))
+    {
         LL_USART_ClearFlag_IDLE(USART3);        //Clear IDLE line Flag
-        USART_Rx_Check();                       //Filter received data
+        USART_Process_Data();                       //Filter received data
     }
 }
 
