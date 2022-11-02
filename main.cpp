@@ -1,12 +1,12 @@
 /* Walrus ROV
- * STM32F4 ROV 
- * /09/2022
+ * STM32F4 ROV Controller
+ * 02/11/2022
  * Alexander, Tony, Clinton
  *
  * PS3 Controls Packet Format: 
- *  1  4   7  10   13  16  19 20 21 22 23 24 25 28
- * "# 000 000 000 000 000 000 0  0  0  0  0  0  000" = 28
- * Pound, L1, L2, LeftHatX, LefthatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square, Checksum
+ *  0 12 345 678 901 234 567 890 1  2  3  4  5  6  789 0
+ * "# 99 000 000 000 000 000 000 0  0  0  0  0  0  999 #" = 31
+ * Pound, Count, L1, L2, LeftHatX, LefthatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square, Checksum, Pound
  * 
  * //Motor Pin Initializations:
  * PwmOut motor1(PB_7);       //Motor: Front Z
@@ -42,29 +42,6 @@ UART_HandleTypeDef huart2; //Serial Monitor
 
 Thread packetParserThread; //Thread to parse packets into below variables
 Thread motorControlThread; //Thread that takes parsed packet data and maps to DC for motors 
-
-PwmOut motor1(PA_0);       //Motor: Front Z yes
-PwmOut motor2(PA_1);       //Motor: Rear Z yes
-PwmOut motor3(PA_5);       //Motor: Front Right yes
-PwmOut motor4(PA_7);       //Motor: Front Left yes
-PwmOut motor5(PB_5);       //Motor: Back Right no
-PwmOut motor6(PB_3);       //Motor: Back Left no
-
-    float motor1DC = 0.0; 
-    float motor2DC = 0.0;
-    float motor3DC = 0.0;
-    float motor4DC = 0.0;
-    float motor5DC = 0.0;
-    float motor6DC = 0.0;
-
-
-//Pin Initializations:
-//PwmOut motor1(PB_7);       //Motor: Front Z
-//PwmOut motor2(PB_6);       //Motor: Rear Z
-//PwmOut motor3(PE_6);       //Motor: Front Right
-//PwmOut motor4(PF_8);       //Motor: Front Left
-//PwmOut motor5(PF_7);       //Motor: Back Right
-//PwmOut motor6(PF_6);       //Motor: Back Left
 
 //Packet from Control Station Parsed Variables
 int L1;
@@ -141,6 +118,11 @@ void USART_Process_Data()
     {
         newData = true; //Parse a packet
     }
+    //Need to add: 
+    //Checksum calculation on Rx packet
+    //Checksum compare on Rx packet (if != newData false)
+    //Need to check packet starts and ends with # else newData false
+    //Parse packet count if packet count ++ then packet iss good if not then subtract ot determine how many packets are lost
 }
 
 void packetParser()
@@ -214,14 +196,49 @@ void packetParser()
 
 void motorControl()
 {
-    //Thread that control PWM signal outputs within parameters below, uses global parsed data
+    //Thread that controls PWM signal outputs within parameters below, uses global parsed data
     //Initialize PWM: 3.9ms Period | 256Hz | High DC: 48% | Stop DC: 38% | Low DC: 28%
-    float maxPowa = 41.0;
+    //Basic Controls Operation:
+    //Forwards: 110 > LeftHatY > 0 && 110 > RightHatY > 0 | motor3, motor4, motor5, motor6 
+    //Backwards: 120 < LeftHatY < 255 && 120 < RightHatY < 255| motor3, motor4, motor5, motor6
+    //Left Forwards: 110 > RightHatY > 0 | motor3, motor5
+    //Right Forwards: 110 > LeftHatY > 0 | motor4, motor6
+    //Left Backwards:
+    //Right Backwards:
+    //Spinbot Right:
+    //Spinbot Left:
+    //UP: L2 > 10 | motor1 , motor2
+    //DWN: L1 > 10 |motor1, motor2 
+
+    //Define max and min PWM's 
+    float maxPowa = 41.0; 
     float minPowa = 35.0;
     float stopPowa = 38.0;
     //float maxPowa = 48.0;
     //float minPowa = 28.0;
     //float stopPowa = 38.0;
+
+    float motor1DC = 0.0; 
+    float motor2DC = 0.0;
+    float motor3DC = 0.0;
+    float motor4DC = 0.0;
+    float motor5DC = 0.0;
+    float motor6DC = 0.0;
+
+    PwmOut motor1(PA_0);       //Front Z - TIM3 Ch1
+    PwmOut motor2(PA_1);       //Rear  Z - TIM3 Ch2
+    PwmOut motor3(PB_6);       //Front R - TIM4 Ch1
+    PwmOut motor4(PB_7);       //Front L - TIM4 Ch2
+    PwmOut motor5(PB_8);       //Back  R - TIM4 Ch3
+    PwmOut motor6(PB_9);       //Back  L - TIM4 Ch4
+
+    //Pin Initializations:
+    //PwmOut motor1(PB_7);       //Front Z - TIM4 Ch2
+    //PwmOut motor2(PB_6);       //Rear  Z - TIM4 Ch1
+    //PwmOut motor3(PE_6);       //Front R - TIM9 Ch2
+    //PwmOut motor4(PF_8);       //Front L - TIM13 Ch1
+    //PwmOut motor5(PF_7);       //Back  R - TIM11 Ch1
+    //PwmOut motor6(PF_6);       //Back  L - TIM10 Ch1
 
     //Period / Frequency Initializations:
     motor1.period(0.0039);
@@ -238,72 +255,122 @@ void motorControl()
     motor5.write(stopPowa/100.0);
     motor6.write(stopPowa/100.0);
     
-    thread_sleep_for(10000);
+    thread_sleep_for(5000);
     printf("ESC's Initialized!\n");
     
     while (1)
     {
-        //Motor control loop; deadzone programmed with < > values; only ever 2 motors on at once
-        //If none of these conditions are met, returns all motors to off PWM of 38%
-        thread_sleep_for(10);
-        if (LeftHatY < 115)
+        
+        if (LeftHatY < 110 && RightHatY < 110)
         {
-            //Move Forward (motor 5 and motor 6: 48% > DC > 38%)
-            motor5DC = (float)(map(LeftHatY, 115, 0, stopPowa, maxPowa))/100.0; 
-            motor6DC = (float)(map(LeftHatY, 115, 0, stopPowa, maxPowa))/100.0;
+            //Forwards - (motor3, motor4, motor5, motor6 = 48% > DC > 38%)
+            motor3DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0; 
+            motor4DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0; 
+            motor5DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0; 
+            motor6DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0;
 
-            motor5.write(motor5DC);
-            motor6.write(motor6DC);
+            motor3.write(motor3DC); //Front R - PB_6
+            motor4.write(motor4DC); //Front L - PB_7
+            motor5.write(motor5DC); //Back  R - PB_8
+            motor6.write(motor6DC); //Back  L - PB_9
         }
-        else if (LeftHatY > 115)
+        else if (LeftHatY > 120 && RightHatY > 120)
         {
-            //Move Backwards: (motor 5 and motor 6: 38% > DC > 28%)
-            motor5DC = (float)(map(LeftHatY, 255, 115, stopPowa, maxPowa))/100.0;
-            motor6DC = (float)(map(LeftHatY, 255, 115, stopPowa, maxPowa))/100.0;
+            //Backwards: (motor3, motor4, motor5, motor6 = 38% > DC > 28%)
+            motor3DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
+            motor4DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
+            motor5DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
+            motor6DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
 
-            motor5.write(motor5DC);
-            motor6.write(motor6DC);
+            motor3.write(motor3DC); //Front R - PB_6
+            motor4.write(motor4DC); //Front L - PB_7
+            motor5.write(motor5DC); //Back  R - PB_8
+            motor6.write(motor6DC); //Back  L - PB_9
         }
-        else if (LeftHatX < 130)
+        else if (RightHatY < 110 && LeftHatY < 120 && LeftHatY > 110)
         {
-            //Move Left: (motor 5 and motor 3: 48% > DC > 38%)
-            motor5DC = (float)(map(LeftHatX, 130, 0, stopPowa, maxPowa))/100.0;
-            motor3DC = (float)(map(LeftHatX, 130, 0, stopPowa, maxPowa))/100.0;
+            //Left Forwards: (motor 3, motor 5: 48% > DC > 38%)
+            motor5DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0;
+            motor3DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0;
 
-            motor5.write(motor5DC);
-            motor3.write(motor3DC);
+            motor3.write(motor3DC); //Front R - PB_6
+            motor5.write(motor5DC); //Back  R - PB_8
         }
-        else if (LeftHatX > 140)
+        else if (LeftHatY < 110 && RightHatY < 120 && RightHatY > 110)
         {
-            //Move Right: (motor 6 and motor 4: 48% > DC > 38%)
-            motor6DC = (float)(map(LeftHatX, 140, 255, stopPowa, maxPowa))/100.0;
-            motor4DC = (float)(map(LeftHatX, 140, 255, stopPowa, maxPowa))/100.0;
+            //Right Forwards: (motor4, motor6: 48% > DC > 38%)
+            motor4DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0; 
+            motor6DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0;
 
-            motor6.write(motor6DC);
-            motor4.write(motor4DC);
+            motor4.write(motor4DC); //Front L - PB_7
+            motor6.write(motor6DC); //Back  L - PB_9
 
         }
-        if (L1 > 0)
+        else if (RightHatY > 120 && LeftHatY < 120 && LeftHatY > 110)
         {
-            //Move Up (motor 1 and motor 2: 38% > DC > 48%)
+            //Left Backwards: (motor3, motor5: 38% > DC > 28%)
+            motor3DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
+            motor5DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
+
+            motor3.write(motor3DC); //Front R - PB_6
+            motor5.write(motor5DC); //Back  R - PB_8
+        }
+        else if (LeftHatY > 120 && RightHatY < 120 && RightHatY > 110)
+        {
+            //Right Backwards: (motor4, motor6)
+            motor4DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
+            motor6DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
+
+            motor4.write(motor4DC); //Front L - PB_7
+            motor6.write(motor6DC); //Back  L - PB_9
+        }
+        else if ()
+        {
+            //Spinbot Left
+            motor3DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
+            motor4DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0; 
+            motor5DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
+            motor6DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0;
+
+            motor3.write(motor3DC); //Front R - PB_6
+            motor4.write(motor4DC); //Front L - PB_7
+            motor5.write(motor5DC); //Back  R - PB_8
+            motor6.write(motor6DC); //Back  L - PB_9
+        }
+        else if ()
+        {
+            //Spinbot Right
+            motor3DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0;
+            motor4DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
+            motor5DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0;
+            motor6DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
+
+            motor3.write(motor3DC); //Front R - PB_6
+            motor5.write(motor5DC); //Back  R - PB_8
+            motor4.write(motor4DC); //Front L - PB_7
+            motor6.write(motor6DC); //Back  L - PB_9
+        }
+        else if (L1 > 0)
+        {
+            //Up: (motor 1 and motor 2: 38% > DC > 48%)
             motor1DC = (float)(map(L1, 0, 255, stopPowa, maxPowa))/100.0;
             motor2DC = (float)(map(L1, 0, 255, stopPowa, maxPowa))/100.0;
 
-            motor1.write(motor1DC);
-            motor2.write(motor2DC);
+            motor1.write(motor1DC); //PA_0
+            motor2.write(motor2DC); //PA_1
         }
         else if (L2 > 0)
         {
-            //Move Down (motor 1 and motor 2: 28% > DC > 38%)
+            //Down (motor 1 and motor 2: 28% > DC > 38%)
             motor1DC = (float)(map(L2, 0, 255, stopPowa, minPowa))/100.0;
             motor2DC = (float)(map(L2, 0, 255, stopPowa, minPowa))/100.0;
 
-            motor1.write(motor1DC);
-            motor2.write(motor2DC);
+            motor1.write(motor1DC); //PA_0
+            motor2.write(motor2DC); //PA_1
         }
-        else
+        else 
         {
-            //Idle mode
+            //If no conditions were met, set all motors to stop
             motor1.write(stopPowa/100.0);
             motor2.write(stopPowa/100.0);
             motor3.write(stopPowa/100.0);
@@ -316,7 +383,10 @@ void motorControl()
 
 long map(long x, long in_min, long in_max, long out_min, long out_max) 
 {
-    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min; 
+    //Ex. Lefthatx = 50 inmin = 115 inmax = 0 outmin = 38 outmax = 48 ANS = 43.65
+    //Ex. L2 = 200 inmin = 0 inmax = 255 outmin = 38 outmax = 28 ANS = 30.15
+
 }
 
 /***INITIALIZATIONS***/
