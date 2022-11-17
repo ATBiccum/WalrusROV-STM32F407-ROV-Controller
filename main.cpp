@@ -1,44 +1,29 @@
 /* Walrus ROV
  * STM32F4 ROV Controller
- * 02/11/2022
- * Alexander, Tony, Clinton
- *
- * PS3 Controls Packet Format: 
- *  0 12 345 678 901 234 567 890 1  2  3  4  5  6  789 0
- * "# 99 000 000 000 000 000 000 0  0  0  0  0  0  999 #" = 31
- * Pound, Count, L1, L2, LeftHatX, LefthatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square, Checksum, Pound
+ * 06/11/2022
  * 
- * //Motor Pin Initializations:
- * PwmOut motor1(PB_7);       //Motor: Front Z
- * PwmOut motor2(PB_6);       //Motor: Rear Z
- * PwmOut motor3(PE_6);       //Motor: Front Right
- * PwmOut motor4(PF_8);       //Motor: Front Left
- * PwmOut motor5(PF_7);       //Motor: Back Right
- * PwmOut motor6(PF_6);       //Motor: Back Left
- *
- * RESORUCES:
- * https://os.mbed.com/users/Owen/code/nRF24L01P/
- * https://os.mbed.com/cookbook/nRF24L01-wireless-transceiver
- * https://forums.mbed.com/t/hitchhikers-guide-to-printf-in-mbed-6/12492
- * https://controllerstech.com/how-to-setup-uart-using-registers-in-stm32/
- * https://arduino.ua/docs/AfroESC30A.pdf
- * https://os.mbed.com/handbook/PwmOut
- * https://www.st.com/resource/en/reference_manual/dm00031020-stm32f405-415-stm32f407-417-stm32f427-437-and-stm32f429-439-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf
- * https://os.mbed.com/docs/mbed-os/v6.15/apis/thread.html
- * https://forum.arduino.cc/t/simple-nrf24l01-2-4ghz-transceiver-demo/405123
- * https://os.mbed.com/users/belloula/code/mbed_blinko//file/84c281baac9c/main.cpp/
- *
+ * Processor:
+ * STM32F407ZGT6
  */
+
 #include <mbed.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-#include "main.h"
+#include "main.h" 
 #include "cmsis.h"
 
 #define ARRAY_LEN(x)            (sizeof(x) / sizeof((x)[0]))
 
 UART_HandleTypeDef huart2; //Serial Monitor
+I2C_HandleTypeDef hi2c1;   //Pressure sensor and IMU
+
+//Timers for PWM Pins
+TIM_HandleTypeDef htim4;   
+TIM_HandleTypeDef htim9;
+TIM_HandleTypeDef htim10;
+TIM_HandleTypeDef htim11;
+TIM_HandleTypeDef htim13;
 
 Thread packetParserThread; //Thread to parse packets into below variables
 Thread motorControlThread; //Thread that takes parsed packet data and maps to DC for motors 
@@ -59,76 +44,141 @@ int Square;
 
 //RS485 Tx and Rx Variables
 uint8_t RS485_RxDataBuf[32] = {0};
-uint8_t RS485_RxData[32] = {0};                              //"#99RANDOMSENSORDATABABYOHYA999#"
-uint8_t RS485_TxData[32] = "#99RANDOMSENSORDATABABYOHYA999#"; //"#99000000134111154132000000999#"
+uint8_t RS485_RxData[32] = {0}; //"#99RANDOMSENSORDATABABYOHYA999#"
+uint8_t RS485_TxData[64] = "#9900000000000000000000000999#"; //"#99000000134111154132000000999#"
 size_t old_posRx;
 size_t posRx;
 bool newData = false;
+
+bool MOTORSOFF = true; 
+
+//IMU Variables
+uint8_t eulXLSB = 0x1A;
+uint8_t eulXMSB = 0x1B;
+uint8_t eulYLSB = 0x1C;
+uint8_t eulYMSB = 0x1D;
+uint8_t eulZLSB = 0x1E;
+uint8_t eulZMSB = 0x1F;
+
+uint8_t EXlsb = 0;
+uint8_t EXmsb = 0;
+uint8_t EYlsb = 0;
+uint8_t EYmsb = 0;
+uint8_t EZlsb = 0;
+uint8_t EZmsb = 0;
+
+uint8_t Mode[2];
+uint8_t Units[2];
+
+int16_t Xval = 0;
+int16_t Yval = 0;
+int16_t Zval = 0;
+
+//Pressure Sensor Variables
+uint8_t truncTemp;
+uint8_t Depth;
+
+typedef union _BYTE_TO_INT16 
+{
+    uint8_t Half[2];
+    int16_t Whole;
+}_BYTE_TO_INT16;
+
+typedef union _BYTE_TO_UINT16 
+{
+    uint8_t Half[2];
+    uint16_t Whole;
+}_BYTE_TO_UINT16;
+
+typedef union _BYTE_TO_UINT32 
+{
+    uint8_t Half[4];
+    unsigned int Whole;
+}_BYTE_TO_UINT32;
 
 int main()
 {
     NVIC_SetPriorityGrouping(NVIC_PRIORITYGROUP_4);
     
-    SystemClock_Config();       //Initialize Clocks 
-    GPIO_Init();                //Initialize all GPIO Pins for Periph's and Outputs
-    USART2_UART_Init();         //Initialize UART2 for the Serial Monitor
-    
-    motorControlThread.start(motorControl);     //Start Motor Control (Init's as OFF)
-    packetParserThread.start(packetParser);     //Start Parsing of Received Wireless Packets 
+    HAL_Init();
+    GPIO_Init();           
 
-    thread_sleep_for(1000);
-    USART3_UART_Init();         //Initialize UART3 for RS485 Coms
+    TIM4_Init();
+    TIM9_Init();
+    TIM10_Init();
+    TIM11_Init();
+    TIM13_Init();
+
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(&htim13, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim11, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);
+    
+    //I2C1_Init();
+    USART2_UART_Init();          //Initialize UART2 for the Serial Monitor
+    USART3_UART_Init();          //Initialize UART3 for RS485 Coms
     DMA_Start_Transmit();        //Start DMA Transmission on UART3 for RS485
 
+    motorControlThread.start(motorControl);     //Start Motor Control (Init's as OFF)
+    packetParserThread.start(packetParser);     //Start Parsing of Received Wireless Packets 
+/*
+    //Mode Select Address and Value
+    Mode[0] = 0x3D;
+    Mode[1] = 0x0C;
+    //Unit Select Address and Value
+    Units[0] = 0x3B;
+    Units[1] = 0x00;
+    //Mode Select
+    HAL_I2C_Master_Transmit(&hi2c1, 0x28<<1, Mode, 2, 100);
+    thread_sleep_for(100);
+    HAL_I2C_Master_Transmit(&hi2c1, 0x28<<1, Units, 2, 100);
+    thread_sleep_for(100);
+
+    //Call Once to initialize pressure sensor
+    uint8_t resSeq = 30;
+    HAL_I2C_Master_Transmit(&hi2c1, 0x76<<1, &resSeq, 1, 1000);
+*/
     while(1)
     {
-        LL_GPIO_TogglePin(GPIOD, LL_GPIO_PIN_12);
-        thread_sleep_for(100);
-
+        thread_sleep_for(250);
         printf("Data:%s|L1:%d|L2:%d|LeftHatX:%d|LeftHatY:%d|RightHatX:%d|RightHatY:%d|R1:%d|R2:%d|Triangle:%d|Circle:%d|Cross:%d|Square:%d|\n", RS485_RxDataBuf, L1, L2, LeftHatX, LeftHatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square);
-        //printf("Data:%s|M1:%d|M2:%d|M3:%d|M4:%d|M5:%d|M6:%d\n", RS485_RxDataBuf, (int)motor1DC, (int)motor2DC, (int)motor3DC, (int)motor4DC, (int)motor5DC, (int)motor6DC);
+        /*
+        readIMUData();
+        readPressureSensor();
+
+        createTransmitPacket();
+*/
+
+        if(Cross == 1)
+        {
+            MOTORSOFF = false;
+        }
+        if(Square == 1)
+        {
+            MOTORSOFF = true;
+        }
     }
 }
 
-/***ACTIVE FUNCTIONS***/
-void DMA_Start_Transmit(void)
-{
-    //Disable the channel or stream to be reconfigured before Tx
-    LL_DMA_DisableStream(DMA1, LL_DMA_STREAM_3);
-    //Configure DMA memory addresses for UART to grab from
-    LL_DMA_SetMemoryAddress(DMA1, LL_DMA_STREAM_3, (uint32_t)RS485_TxData);
-    //Configure DMA length (number of bytes to transmit)
-    LL_DMA_SetDataLength(DMA1, LL_DMA_STREAM_3, ARRAY_LEN(RS485_TxData));
-    //Enabe UART DMA Tx Request
-    LL_USART_EnableDMAReq_TX(USART3); //this line freeze
-    //Enable UART Tx Direction
-    LL_USART_EnableDirectionTx(USART3); //Not sure if needed 
-    //Clear all flags
-    LL_DMA_ClearFlag_TC3(DMA1);
-    LL_DMA_ClearFlag_TE3(DMA1);
-    //Enable DMA stream or channel to start tranmission
-    LL_DMA_EnableStream(DMA1, LL_DMA_STREAM_3); 
-}
 
-void USART_Process_Data() 
-{
-    //Check sum will go here before newData is set to true
-    memcpy(RS485_RxData, &RS485_RxDataBuf, 32);
-    if(RS485_RxData[0]=='#')
-    {
-        newData = true; //Parse a packet
-    }
-    //Need to add: 
-    //Checksum calculation on Rx packet
-    //Checksum compare on Rx packet (if != newData false)
-    //Need to check packet starts and ends with # else newData false
-    //Parse packet count if packet count ++ then packet iss good if not then subtract ot determine how many packets are lost
-}
-
+/***THREADS***/
 void packetParser()
 {
     //This thread runs continuously checking is newData bool is true. 
     //If so; performs a single parse and resets newData variable.
+
+    //Deadzone variables
+    int dzTriggers = 5;
+    int dzLeftHatYmin  = 110;
+    int dzLeftHatYmax  = 120;
+    int dzLeftHatXmin  = 110;
+    int dzLeftHatXmax  = 120;
+    int dzRightHatYmin = 110;
+    int dzRightHatYmax = 120;
+    int dzRightHatXmin = 110;
+    int dzRightHatXmax = 120;
 
     //Packet Parsing Buffers 
     char subtext3[4];   //3 Digit Buffer
@@ -141,17 +191,21 @@ void packetParser()
         {
             memcpy(parseBuffer, &RS485_RxData, 32);
 
+            //L1
             memcpy(subtext3, &parseBuffer[3], 3);
             subtext3[3] = '\0';
             sscanf(subtext3, "%d", &L1);
+            if(L1<dzTriggers){L1 = 0;}
             //L2
             memcpy(subtext3, &parseBuffer[6], 3);
             subtext3[3] = '\0';
             sscanf(subtext3, "%d", &L2);
+            if(L2<dzTriggers){L2 = 0;}
             //LeftHatX
             memcpy(subtext3, &parseBuffer[9], 3);
             subtext3[3] = '\0';
             sscanf(subtext3, "%d", &LeftHatX);
+            if(LeftHatX>dzLeftHatXmin && LeftHatX<dzLeftHatXmax){LeftHatX=115;}
             //LeftHatY
             memcpy(subtext3, &parseBuffer[12], 3);
             subtext3[3] = '\0';
@@ -197,196 +251,273 @@ void packetParser()
 void motorControl()
 {
     //Thread that controls PWM signal outputs within parameters below, uses global parsed data
-    //Initialize PWM: 3.9ms Period | 256Hz | High DC: 48% | Stop DC: 38% | Low DC: 28%
-    //Basic Controls Operation:
-    //Forwards: 110 > LeftHatY > 0 && 110 > RightHatY > 0 | motor3, motor4, motor5, motor6 
-    //Backwards: 120 < LeftHatY < 255 && 120 < RightHatY < 255| motor3, motor4, motor5, motor6
-    //Left Forwards: 110 > RightHatY > 0 | motor3, motor5
-    //Right Forwards: 110 > LeftHatY > 0 | motor4, motor6
-    //Left Backwards:
-    //Right Backwards:
-    //Spinbot Right:
-    //Spinbot Left:
-    //UP: L2 > 10 | motor1 , motor2
-    //DWN: L1 > 10 |motor1, motor2 
+    //Initialize PWM: 4.1ms Period | 243Hz | 0-65535
+    //PWM: 4100us = 65535
+    //Forward: 1860us = 29730
+    //Reverse: 1060us = 16944
+    //Stop: 1480us = 23657
 
     //Define max and min PWM's 
-    float maxPowa = 41.0; 
-    float minPowa = 35.0;
-    float stopPowa = 38.0;
+    int maxPowa = 29730; 
+    int minPowa = 16944;
+    int stopPowa = 23657;
     //float maxPowa = 48.0;
     //float minPowa = 28.0;
     //float stopPowa = 38.0;
 
-    float motor1DC = 0.0; 
-    float motor2DC = 0.0;
-    float motor3DC = 0.0;
-    float motor4DC = 0.0;
-    float motor5DC = 0.0;
-    float motor6DC = 0.0;
+    int motor1DC = stopPowa; 
+    int motor2DC = stopPowa;
+    int motor3DC = stopPowa;
+    int motor4DC = stopPowa;
+    int motor5DC = stopPowa;
+    int motor6DC = stopPowa;
 
-    PwmOut motor1(PA_0);       //Front Z - TIM3 Ch1
-    PwmOut motor2(PA_1);       //Rear  Z - TIM3 Ch2
-    PwmOut motor3(PB_6);       //Front R - TIM4 Ch1
-    PwmOut motor4(PB_7);       //Front L - TIM4 Ch2
-    PwmOut motor5(PB_8);       //Back  R - TIM4 Ch3
-    PwmOut motor6(PB_9);       //Back  L - TIM4 Ch4
-
-    //Pin Initializations:
-    //PwmOut motor1(PB_7);       //Front Z - TIM4 Ch2
-    //PwmOut motor2(PB_6);       //Rear  Z - TIM4 Ch1
-    //PwmOut motor3(PE_6);       //Front R - TIM9 Ch2
-    //PwmOut motor4(PF_8);       //Front L - TIM13 Ch1
-    //PwmOut motor5(PF_7);       //Back  R - TIM11 Ch1
-    //PwmOut motor6(PF_6);       //Back  L - TIM10 Ch1
-
-    //Period / Frequency Initializations:
-    motor1.period(0.0039);
-    motor2.period(0.0039);
-    motor3.period(0.0039);
-    motor4.period(0.0039);
-    motor5.period(0.0039);
-    motor6.period(0.0039);
-
-    motor1.write(stopPowa/100.0);
-    motor2.write(stopPowa/100.0);
-    motor3.write(stopPowa/100.0);
-    motor4.write(stopPowa/100.0);
-    motor5.write(stopPowa/100.0);
-    motor6.write(stopPowa/100.0);
+    TIM4->CCR1 =  motor1DC;  //Front Z - TIM4  Ch2 AF2
+    TIM4->CCR2 =  motor2DC;  //Rear  Z - TIM4  Ch1 AF2
+    TIM9->CCR2 =  motor3DC;  //Front R - TIM9  Ch2 AF3
+    TIM13->CCR1 = motor4DC; //Front L - TIM13 Ch1 AF9
+    TIM11->CCR1 = motor5DC; //Back  R - TIM11 Ch1 AF3
+    TIM10->CCR1 = motor6DC; //Back  L - TIM10 Ch1 AF3
     
-    thread_sleep_for(5000);
-    printf("ESC's Initialized!\n");
+    thread_sleep_for(10000);
     
     while (1)
     {
-        
-        if (LeftHatY < 110 && RightHatY < 110)
+        if(MOTORSOFF)
         {
-            //Forwards - (motor3, motor4, motor5, motor6 = 48% > DC > 38%)
-            motor3DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0; 
-            motor4DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0; 
-            motor5DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0; 
-            motor6DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0;
+            int motor1DC = stopPowa; 
+            int motor2DC = stopPowa;
+            int motor3DC = stopPowa;
+            int motor4DC = stopPowa;
+            int motor5DC = stopPowa;
+            int motor6DC = stopPowa;
 
-            motor3.write(motor3DC); //Front R - PB_6
-            motor4.write(motor4DC); //Front L - PB_7
-            motor5.write(motor5DC); //Back  R - PB_8
-            motor6.write(motor6DC); //Back  L - PB_9
+            TIM4->CCR1 =  motor1DC;  //Front Z - TIM4  Ch2 AF2
+            TIM4->CCR2 =  motor2DC;  //Rear  Z - TIM4  Ch1 AF2
+            TIM9->CCR2 =  motor3DC;  //Front R - TIM9  Ch2 AF3
+            TIM13->CCR1 = motor4DC; //Front L - TIM13 Ch1 AF9
+            TIM11->CCR1 = motor5DC; //Back  R - TIM11 Ch1 AF3
+            TIM10->CCR1 = motor6DC; //Back  L - TIM10 Ch1 AF3
         }
-        else if (LeftHatY > 120 && RightHatY > 120)
+
+        thread_sleep_for(5);
+
+        if (L1 > 5 && L2 < 5)
         {
-            //Backwards: (motor3, motor4, motor5, motor6 = 38% > DC > 28%)
-            motor3DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
-            motor4DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
-            motor5DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
-            motor6DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
-
-            motor3.write(motor3DC); //Front R - PB_6
-            motor4.write(motor4DC); //Front L - PB_7
-            motor5.write(motor5DC); //Back  R - PB_8
-            motor6.write(motor6DC); //Back  L - PB_9
+            motor1DC = map(L1, 0, 255, stopPowa, maxPowa);
+            motor1DC = map(L1, 0, 255, stopPowa, maxPowa);
         }
-        else if (RightHatY < 110 && LeftHatY < 120 && LeftHatY > 110)
+        if (L2 > 5 && L1 < 5)
         {
-            //Left Forwards: (motor 3, motor 5: 48% > DC > 38%)
-            motor5DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0;
-            motor3DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0;
-
-            motor3.write(motor3DC); //Front R - PB_6
-            motor5.write(motor5DC); //Back  R - PB_8
+            motor1DC = map(L2, 0, 255, stopPowa, minPowa);
+            motor1DC = map(L2, 0, 255, stopPowa, minPowa);   
         }
-        else if (LeftHatY < 110 && RightHatY < 120 && RightHatY > 110)
-        {
-            //Right Forwards: (motor4, motor6: 48% > DC > 38%)
-            motor4DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0; 
-            motor6DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0;
 
-            motor4.write(motor4DC); //Front L - PB_7
-            motor6.write(motor6DC); //Back  L - PB_9
+        motor3DC = map(RightHatY, 255, 0, minPowa, maxPowa); 
+        motor4DC = map(LeftHatY, 255, 0, minPowa, maxPowa); 
+        motor5DC = map(RightHatY, 255, 0, minPowa, maxPowa); 
+        motor6DC = map(LeftHatY, 255, 0, minPowa, maxPowa);
 
-        }
-        else if (RightHatY > 120 && LeftHatY < 120 && LeftHatY > 110)
-        {
-            //Left Backwards: (motor3, motor5: 38% > DC > 28%)
-            motor3DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
-            motor5DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
-
-            motor3.write(motor3DC); //Front R - PB_6
-            motor5.write(motor5DC); //Back  R - PB_8
-        }
-        else if (LeftHatY > 120 && RightHatY < 120 && RightHatY > 110)
-        {
-            //Right Backwards: (motor4, motor6)
-            motor4DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
-            motor6DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
-
-            motor4.write(motor4DC); //Front L - PB_7
-            motor6.write(motor6DC); //Back  L - PB_9
-        }
-        else if ()
-        {
-            //Spinbot Left
-            motor3DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
-            motor4DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0; 
-            motor5DC = (float)(map(RightHatY, 255, 120, minPowa, stopPowa))/100.0;
-            motor6DC = (float)(map(LeftHatY, 110, 0, stopPowa, maxPowa))/100.0;
-
-            motor3.write(motor3DC); //Front R - PB_6
-            motor4.write(motor4DC); //Front L - PB_7
-            motor5.write(motor5DC); //Back  R - PB_8
-            motor6.write(motor6DC); //Back  L - PB_9
-        }
-        else if ()
-        {
-            //Spinbot Right
-            motor3DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0;
-            motor4DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
-            motor5DC = (float)(map(RightHatY, 110, 0, stopPowa, maxPowa))/100.0;
-            motor6DC = (float)(map(LeftHatY, 255, 120, minPowa, stopPowa))/100.0;
-
-            motor3.write(motor3DC); //Front R - PB_6
-            motor5.write(motor5DC); //Back  R - PB_8
-            motor4.write(motor4DC); //Front L - PB_7
-            motor6.write(motor6DC); //Back  L - PB_9
-        }
-        else if (L1 > 0)
-        {
-            //Up: (motor 1 and motor 2: 38% > DC > 48%)
-            motor1DC = (float)(map(L1, 0, 255, stopPowa, maxPowa))/100.0;
-            motor2DC = (float)(map(L1, 0, 255, stopPowa, maxPowa))/100.0;
-
-            motor1.write(motor1DC); //PA_0
-            motor2.write(motor2DC); //PA_1
-        }
-        else if (L2 > 0)
-        {
-            //Down (motor 1 and motor 2: 28% > DC > 38%)
-            motor1DC = (float)(map(L2, 0, 255, stopPowa, minPowa))/100.0;
-            motor2DC = (float)(map(L2, 0, 255, stopPowa, minPowa))/100.0;
-
-            motor1.write(motor1DC); //PA_0
-            motor2.write(motor2DC); //PA_1
-        }
-        else 
-        {
-            //If no conditions were met, set all motors to stop
-            motor1.write(stopPowa/100.0);
-            motor2.write(stopPowa/100.0);
-            motor3.write(stopPowa/100.0);
-            motor4.write(stopPowa/100.0);
-            motor5.write(stopPowa/100.0);
-            motor6.write(stopPowa/100.0);
-        }
+        TIM4->CCR1 =  motor1DC;  //Front Z - TIM4  Ch2 AF2
+        TIM4->CCR2 =  motor2DC;  //Rear  Z - TIM4  Ch1 AF2
+        TIM9->CCR2 =  motor3DC;  //Front R - TIM9  Ch2 AF3
+        TIM13->CCR1 = motor4DC; //Front L - TIM13 Ch1 AF9
+        TIM11->CCR1 = motor5DC; //Back  R - TIM11 Ch1 AF3
+        TIM10->CCR1 = motor6DC; //Back  L - TIM10 Ch1 AF3
     }
+}
+
+/***ACTIVE FUNCTIONS***/
+void readIMUData()
+{
+    //Read IMU Data
+    union _BYTE_TO_INT16 EX;
+    union _BYTE_TO_INT16 EY;
+    union _BYTE_TO_INT16 EZ;
+
+    //Read Euler Angles
+    //Function takes address of LSB and MSB Euler data registers for a specific axis as well as a location to store the data
+    getIMUreg(eulXLSB, eulXMSB, &EXlsb, &EXmsb);
+    EX.Half[0] = EXlsb;
+    EX.Half[1] = EXmsb;
+    getIMUreg(eulYLSB, eulYMSB, &EYlsb, &EYmsb);
+    EY.Half[0] = EYlsb;
+    EY.Half[1] = EYmsb;
+    getIMUreg(eulZLSB, eulZMSB, &EZlsb, &EZmsb);
+    EZ.Half[0] = EZlsb;
+    EZ.Half[1] = EZmsb;
+
+    Xval = map(abs(EX.Whole), 0, 5900, 0, 200);
+    Yval = map(abs(EY.Whole), -1440, 1440, 0, 200);
+    Zval = map(abs(EZ.Whole), -2880, 2880, 0, 200);
+
+    //printf("IMU Data: X = %d Y = %d Z = %d \n", Xval, Yval, Zval);
+}
+
+void readPressureSensor()
+{
+    union _BYTE_TO_UINT32 U32;
+    //     union _BYTE_TO_UINT16 U16;
+    //  uint8_t C5Add = 0xAA;
+    //  uint8_t C6Add = 0xAC;
+    //  uint8_t C1Add = 0xA2;
+    //  uint8_t C2Add = 0xA4;
+    //  uint8_t C3Add = 0xA6;
+    //  uint8_t C4Add = 0xA8;
+    uint8_t getPres = 0x48;
+    uint8_t getTemp = 0x58;
+    uint8_t readSens = 0x00;
+    uint8_t receiveBuff[3];
+    //  uint8_t receiveBuf[2];
+    uint16_t C1 = 33647;
+    uint16_t C2 = 34302;
+    uint16_t C3 = 20176;
+    uint16_t C4 = 21815;
+    uint16_t C5 = 26721;
+    uint16_t C6 = 26600;
+    uint32_t uncompTemp = 0;
+    uint32_t uncompPres = 0;
+    int32_t dT = 0;
+    float Temp = 0;
+    double Pres = 0;
+    int64_t OFF = 0;
+    int64_t SENS = 0;
+
+    HAL_I2C_Master_Transmit(&hi2c1, 0x76<<1, &getTemp, 1, 1000);
+    thread_sleep_for(20);
+    HAL_I2C_Master_Transmit(&hi2c1, 0x76<<1, &readSens, 1, 1000);
+    HAL_I2C_Master_Receive(&hi2c1, 0x76<<1, &receiveBuff[0], 3, 1000);
+    U32.Half[3] = 0;
+    U32.Half[0] = receiveBuff[2];
+    U32.Half[1] = receiveBuff[1];
+    U32.Half[2] = receiveBuff[0];
+    uncompTemp = U32.Whole;
+
+    dT = (uncompTemp - (C5 * 256.0));
+    Temp = ((2000 + (dT * C6 / 8388608.0))/100.0);
+    printf("Temp = %0.2f \n", Temp);
+    HAL_I2C_Master_Transmit(&hi2c1, 0x76<<1, &getPres, 1, 1000);
+    thread_sleep_for(20);
+    HAL_I2C_Master_Transmit(&hi2c1, 0x76<<1, &readSens, 1, 1000);
+    HAL_I2C_Master_Receive(&hi2c1, 0x76<<1, &receiveBuff[0], 3, 1000);
+    U32.Half[3] = 0;
+    U32.Half[0] = receiveBuff[2];
+    U32.Half[1] = receiveBuff[1];
+    U32.Half[2] = receiveBuff[0];
+    uncompPres = U32.Whole;
+
+    int64_t tOff = (int64_t)(C4 / 128.0 * dT);
+    uint32_t tOff1 = C2 * 65536;
+    OFF = ((int64_t)tOff1 + tOff);
+    SENS = (C1 * 32768 + (C3 * (int64_t)dT) /256);
+    Pres = (((uncompPres * SENS / 2097152.0 - OFF) / 8192.0) /10.0);
+
+    truncTemp = (uint8_t)Temp;
+    Depth = map(Pres, 1000, 10000, 0, 100);
+
+    //printf("\n \n trunc: %d depth: %d \n \n", truncTemp, Depth);
+    //printf("Pressure = %0.0f mbar \n", Pres);
+}
+
+void createTransmitPacket()
+{
+    //Receive IMU data make packet 
+    //RS485_TxData fill with sensor shit
+    //    IMX IMY IMZ Dep Tem
+    //#99 000 000 000 000 00
+    //#99 000 000 000 000 000 0 0 0 0 0 0 0 0 999#
+
+    uint8_t arrayBuffer[32] = "#9900000000000000000000000999#";
+    int buffer = Xval;
+    for(int i = 5; i < 3; i--)
+    {
+        arrayBuffer[i] = buffer % 10;
+        buffer /= 10;
+    }
+
+    buffer = Yval;
+    for(int i = 8; i < 6; i--)
+    {
+        arrayBuffer[i] = buffer % 10;
+        buffer /= 10;
+    }
+
+    buffer = Zval;
+    for(int i = 11; i < 9; i--)
+    {
+        arrayBuffer[i] = buffer % 10;
+        buffer /= 10;
+    }
+
+    buffer = Depth;
+    for(int i = 14; i < 12; i--)
+    {
+        arrayBuffer[i] = buffer % 10;
+        buffer /= 10;
+    }
+
+    buffer = truncTemp;
+    for(int i = 16; i < 14; i--)
+    {
+        arrayBuffer[i] = buffer % 10;
+        buffer /= 10;
+    }
+
+    memcpy(RS485_TxData, &arrayBuffer, 32);
+}
+
+void getIMUreg(uint8_t register_pointerLSB, uint8_t register_pointerMSB, uint8_t* receive_bufferLSB, uint8_t* receive_bufferMSB)
+{
+    // 0x28 is device address shifted 1 left, register pointer is the location of the register you want to read, 1 is the size of the register pointer
+    HAL_I2C_Master_Transmit(&hi2c1, 0x28<<1, &register_pointerLSB, 1, 100);
+
+    // Data from register transmitted to previously is sent to receive buffer
+    HAL_I2C_Master_Receive(&hi2c1, 0x28<<1, receive_bufferLSB, 1, 100);
+
+    thread_sleep_for(50);
+
+    HAL_I2C_Master_Transmit(&hi2c1, 0x28<<1, &register_pointerMSB, 1, 100);
+    HAL_I2C_Master_Receive(&hi2c1, 0x28<<1, receive_bufferMSB, 1, 100);   
+}
+
+void DMA_Start_Transmit(void)
+{
+    //Disable the channel or stream to be reconfigured before Tx
+    LL_DMA_DisableStream(DMA1, LL_DMA_STREAM_3);
+    //Configure DMA memory addresses for UART to grab from
+    LL_DMA_SetMemoryAddress(DMA1, LL_DMA_STREAM_3, (uint32_t)RS485_TxData);
+    //Configure DMA length (number of bytes to transmit)
+    LL_DMA_SetDataLength(DMA1, LL_DMA_STREAM_3, ARRAY_LEN(RS485_TxData));
+    LL_DMA_SetDataLength(DMA1, LL_DMA_STREAM_3, 32);
+    //Enabe UART DMA Tx Request
+    LL_USART_EnableDMAReq_TX(USART3); //this line freeze
+    //Enable UART Tx Direction
+    LL_USART_EnableDirectionTx(USART3); //Not sure if needed 
+    //Clear all flags
+    LL_DMA_ClearFlag_TC3(DMA1);
+    LL_DMA_ClearFlag_TE3(DMA1);
+    //Enable DMA stream or channel to start tranmission
+    LL_DMA_EnableStream(DMA1, LL_DMA_STREAM_3); 
+}
+
+void USART_Process_Data() 
+{
+    //Check sum will go here before newData is set to true
+    memcpy(RS485_RxData, &RS485_RxDataBuf, 32);
+    if(RS485_RxData[0]=='#')
+    {
+        newData = true; //Parse a packet
+    }
+    //Need to add: 
+    //Checksum calculation on Rx packet
+    //Checksum compare on Rx packet (if != newData false)
+    //Need to check packet starts and ends with # else newData false
+    //Parse packet count if packet count ++ then packet iss good if not then subtract ot determine how many packets are lost
 }
 
 long map(long x, long in_min, long in_max, long out_min, long out_max) 
 {
     return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min; 
-    //Ex. Lefthatx = 50 inmin = 115 inmax = 0 outmin = 38 outmax = 48 ANS = 43.65
-    //Ex. L2 = 200 inmin = 0 inmax = 255 outmin = 38 outmax = 28 ANS = 30.15
-
 }
 
 /***INITIALIZATIONS***/
@@ -397,21 +528,10 @@ static void GPIO_Init(void)
     //GPIO Ports Clock Enable
     LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
     LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOB);
-    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOC);
+    //LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOC);
     LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOD);
     LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOE);
     LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOF);
-
-    //Configure GPIO pin Output Level
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
-
-    //Configure GPIO for on board LED's
-    GPIO_InitStruct.Pin = LL_GPIO_PIN_12|LL_GPIO_PIN_13|LL_GPIO_PIN_14|LL_GPIO_PIN_15;
-    GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-    GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
-    GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-    GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-    LL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
     //Configure GPIO pins for UART3
     LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART3);
@@ -422,47 +542,34 @@ static void GPIO_Init(void)
     GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
     GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
     GPIO_InitStruct.Alternate = LL_GPIO_AF_7;
-    LL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+    LL_GPIO_Init(GPIOD, &GPIO_InitStruct); 
 
-    LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_TIM1);
-    LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM2); 
+    //Configure GPIO pins for I2C
+    LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_I2C1);
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_8 | LL_GPIO_PIN_9;
+    GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
+    GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+    GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
+    GPIO_InitStruct.Alternate = LL_GPIO_AF_4;
+    LL_GPIO_Init(GPIOB, &GPIO_InitStruct); 
 }
 
-void SystemClock_Config(void)
+static void I2C1_Init(void)
 {
-    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+    hi2c1.Instance = I2C1;
+    hi2c1.Init.ClockSpeed = 100000;
+    hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+    hi2c1.Init.OwnAddress1 = 38;
+    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.OwnAddress2 = 0;
+    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
 
-    // Configure the main internal regulator output voltage
-    
-    __HAL_RCC_PWR_CLK_ENABLE();
-    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
-    // Initializes the RCC Oscillators according to the specified parameters
-    // in the RCC_OscInitTypeDef structure.
-    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-    RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-    RCC_OscInitStruct.PLL.PLLM = 8;
-    RCC_OscInitStruct.PLL.PLLN = 336;
-    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-    RCC_OscInitStruct.PLL.PLLQ = 7;
-    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+    if (HAL_I2C_Init(&hi2c1) != HAL_OK)
     {
-    Error_Handler();
-    }
-    // Initializes the CPU, AHB and APB buses clocks
-    
-    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                                |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
-    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV4;
-
-    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
-    {
-    Error_Handler();
+        Error_Handler();
     }
 }
 
@@ -527,11 +634,11 @@ static void USART3_UART_Init(void)
 
     //DMA interrupt init for Tx
     LL_DMA_EnableIT_TC(DMA1, LL_DMA_STREAM_3);
-    NVIC_SetPriority(DMA1_Stream3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 1));
+    NVIC_SetPriority(DMA1_Stream3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));//was 1
     NVIC_EnableIRQ(DMA1_Stream3_IRQn);
 
     //USART Config (Tx done in DMA transmit function)
-    USART_InitStruct.BaudRate = 2500000;
+    USART_InitStruct.BaudRate = 115200; 
     USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
     USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
     USART_InitStruct.Parity = LL_USART_PARITY_NONE;
@@ -550,6 +657,235 @@ static void USART3_UART_Init(void)
     //Enable USART3 and DMA Rx Stream 
     LL_DMA_EnableStream(DMA1, LL_DMA_STREAM_1);
     LL_USART_Enable(USART3);
+}
+
+static void TIM4_Init(void)
+{
+    //APB1 @ 42MHz - we want ~400Hz or 2.5ms
+    //Formula: Timer Frequency = (Bus Clock / Prescaler) / Period
+    //                          400Hz = (42MHz / 42) / 2500 
+
+    __HAL_RCC_TIM4_CLK_ENABLE();
+
+    TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+    TIM_MasterConfigTypeDef sMasterConfig = {0};
+    TIM_OC_InitTypeDef sConfigOC = {0};
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    htim4.Instance = TIM4;
+    htim4.Init.Prescaler = 42;
+    htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim4.Init.Period = 2500;
+    htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+    if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+    if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+    if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = 0;
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+}
+
+static void TIM9_Init(void)
+{
+    //APB2 @ 84MHz - we want ~400Hz or 2.5ms
+    //Formula: Timer Frequency = (Bus Clock / Prescaler) / Period
+    //                          400Hz = (84MHz / 84) / 2500 
+    __HAL_RCC_TIM9_CLK_ENABLE();
+
+    TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+    TIM_OC_InitTypeDef sConfigOC = {0};
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    htim9.Instance = TIM9;
+    htim9.Init.Prescaler = 84;
+    htim9.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim9.Init.Period = 2500;
+    htim9.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim9.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+    if (HAL_TIM_Base_Init(&htim9) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+    if (HAL_TIM_ConfigClockSource(&htim9, &sClockSourceConfig) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    if (HAL_TIM_PWM_Init(&htim9) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = 0;
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    if (HAL_TIM_PWM_ConfigChannel(&htim9, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+    {
+    Error_Handler();
+    }
+
+    GPIO_InitStruct.Pin = GPIO_PIN_6;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF3_TIM9;
+    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+}
+
+static void TIM10_Init(void)
+{
+    //APB2 @ 84MHz - we want ~400Hz or 2.5ms
+    //Formula: Timer Frequency = (Bus Clock / Prescaler) / Period
+    //                          400Hz = (84MHz / 84) / 2500 
+    __HAL_RCC_TIM10_CLK_ENABLE();
+
+    TIM_OC_InitTypeDef sConfigOC = {0};
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    htim10.Instance = TIM10;
+    htim10.Init.Prescaler = 84;
+    htim10.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim10.Init.Period = 2500;
+    htim10.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim10.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+    if (HAL_TIM_Base_Init(&htim10) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    if (HAL_TIM_PWM_Init(&htim10) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = 0;
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    if (HAL_TIM_PWM_ConfigChannel(&htim10, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    GPIO_InitStruct.Pin = GPIO_PIN_6;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF3_TIM10;
+    HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
+}
+
+static void TIM11_Init(void)
+{
+    //APB2 @ 84MHz - we want ~400Hz or 2.5ms
+    //Formula: Timer Frequency = (Bus Clock / Prescaler) / Period
+    //                          400Hz = (84MHz / 84) / 2500 
+    __HAL_RCC_TIM11_CLK_ENABLE();
+
+    TIM_OC_InitTypeDef sConfigOC = {0};
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    htim11.Instance = TIM11;
+    htim11.Init.Prescaler = 84;
+    htim11.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim11.Init.Period = 2500;
+    htim11.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim11.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+    if (HAL_TIM_Base_Init(&htim11) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    if (HAL_TIM_PWM_Init(&htim11) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = 0;
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    if (HAL_TIM_PWM_ConfigChannel(&htim11, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+    {
+    Error_Handler();
+    }
+
+    GPIO_InitStruct.Pin = GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF3_TIM11;
+    HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
+}
+
+static void TIM13_Init(void)
+{
+    //APB1 @ 42MHz - we want ~400Hz or 2.5ms
+    //Formula: Timer Frequency = (Bus Clock / Prescaler) / Period
+    //                          400Hz = (42MHz / 42) / 2500 
+    __HAL_RCC_TIM13_CLK_ENABLE();
+    TIM_OC_InitTypeDef sConfigOC = {0};
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    htim13.Instance = TIM13;
+    htim13.Init.Prescaler = 42;
+    htim13.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim13.Init.Period = 2500;
+    htim13.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim13.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+    if (HAL_TIM_Base_Init(&htim13) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    if (HAL_TIM_PWM_Init(&htim13) != HAL_OK)
+    {
+    Error_Handler();
+    }
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = 0;
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    if (HAL_TIM_PWM_ConfigChannel(&htim13, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+    {
+    Error_Handler();
+    }
+
+    GPIO_InitStruct.Pin = GPIO_PIN_8;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF9_TIM13;
+    HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
+
 }
 
 /***INTERRUPT HANDLERS***/

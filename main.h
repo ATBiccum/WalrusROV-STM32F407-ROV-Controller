@@ -23,6 +23,11 @@ void SystemClock_Config(void);
 static void GPIO_Init(void);
 static void USART2_UART_Init(void);
 static void USART3_UART_Init(void);
+static void TIM4_Init(void);
+static void TIM9_Init(void);
+static void TIM10_Init(void);
+static void TIM11_Init(void);
+static void TIM13_Init(void);
 
 //Active Functions
 long map(long x, long in_min, long in_max, long out_min, long out_max);
@@ -31,11 +36,16 @@ void Error_Handler(void);
 void motorControl();
 void USART_Process_Data();
 void DMA_Start_Transmit(void);
+void readIMUData();
+void readPressureSensor();
+void createTransmitPacket();
+void getIMUreg(uint8_t register_pointerLSB, uint8_t register_pointerMSB, uint8_t* receive_bufferLSB, uint8_t* receive_bufferMSB);
 
 //Interrupt Handlers
 void DMA1_Stream1_IRQHandler(void);
 void DMA1_Stream3_IRQHandler(void);
 void USART3_IRQHandler(void);
+static void I2C1_Init(void);
 
 #ifndef NVIC_PRIORITYGROUP_0
 #define NVIC_PRIORITYGROUP_0         ((uint32_t)0x00000007) /*!< 0 bit  for pre-emption priority,
