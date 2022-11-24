@@ -26,7 +26,7 @@ TIM_HandleTypeDef htim11;
 TIM_HandleTypeDef htim13;
 
 Thread packetParserThread; //Thread to parse packets into below variables
-Thread motorControlThread; //Thread that takes parsed packet data and maps to DC for motors 
+Thread motorControlThread; //Thread that takes parsed packet data and customMaps to DC for motors 
 
 //Packet from Control Station Parsed Variables
 int L1;
@@ -43,14 +43,21 @@ int Cross;
 int Square;
 
 //RS485 Tx and Rx Variables
-uint8_t RS485_RxDataBuf[32] = {0};
+uint8_t RS485_RxDataBuf[1000] = {0};
 uint8_t RS485_RxData[32] = {0}; //"#99RANDOMSENSORDATABABYOHYA999#"
-uint8_t RS485_TxData[64] = "#9900000000000000000000000999#"; //"#99000000134111154132000000999#"
+uint8_t RS485_TxData[32] = "#9900000000000000000000000999#"; //"#99000000134111154132000000999#"
 size_t old_posRx;
 size_t posRx;
 bool newData = false;
+uint8_t parseBuffer[100] = {0};
+char subtext2[2] = {0};
+bool startFilterFlag = false;
 
-bool MOTORSOFF = true; 
+int newPacketCount = 0;
+int oldPacketCount = 0;
+int transmitPacketCount = 0;
+
+bool motorsToggle = false; 
 
 //IMU Variables
 uint8_t eulXLSB = 0x1A;
@@ -142,22 +149,39 @@ int main()
 */
     while(1)
     {
-        thread_sleep_for(250);
-        printf("Data:%s|L1:%d|L2:%d|LeftHatX:%d|LeftHatY:%d|RightHatX:%d|RightHatY:%d|R1:%d|R2:%d|Triangle:%d|Circle:%d|Cross:%d|Square:%d|\n", RS485_RxDataBuf, L1, L2, LeftHatX, LeftHatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square);
-        /*
+        //printf("L1:%d|L2:%d|LeftHatX:%d|LeftHatY:%d|RightHatX:%d|RightHatY:%d|R1:%d|R2:%d|Triangle:%d|Circle:%d|Cross:%d|Square:%d|\n", L1, L2, LeftHatX, LeftHatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square);
+       /*
         readIMUData();
         readPressureSensor();
 
         createTransmitPacket();
-*/
+        */
 
-        if(Cross == 1)
+        if(startFilterFlag) //Filter a received packet from RS485
         {
-            MOTORSOFF = false;
-        }
-        if(Square == 1)
-        {
-            MOTORSOFF = true;
+            //Packet Format: "#99000000134111154132000000999#"
+            for(int i = 0; i < 1000; i++) //Process Rx by filtering through 1000 byte buffer and grab a packet
+            {
+                if(RS485_RxDataBuf[i] == '#' && RS485_RxDataBuf[i+32] == '#') //Check for a # at start and end of packet
+                {
+                    memcpy(subtext2, &RS485_RxDataBuf[i+1], 2);
+                    sscanf(subtext2, "%d", &newPacketCount);
+                    
+                    if(newPacketCount != oldPacketCount) //Check packet count is not equal to old packet number
+                    {
+                        memcpy(RS485_RxData, &RS485_RxDataBuf[i], 32);
+                        newData = true;
+                        motorsToggle = true;
+                        oldPacketCount = newPacketCount;
+
+                        HAL_UART_Transmit(&huart2, (uint8_t *)RS485_RxData, 32, 100);
+                    }
+                    else
+                    {
+                        motorsToggle = false;
+                    }
+                }
+            }
         }
     }
 }
@@ -168,22 +192,29 @@ void packetParser()
 {
     //This thread runs continuously checking is newData bool is true. 
     //If so; performs a single parse and resets newData variable.
+    //Tested Deadzone Packets:
+    //#13000000126106137129000000323#
+    //#19000000127111149138000000341#
 
     //Deadzone variables
     int dzTriggers = 5;
-    int dzLeftHatYmin  = 110;
-    int dzLeftHatYmax  = 120;
-    int dzLeftHatXmin  = 110;
-    int dzLeftHatXmax  = 120;
-    int dzRightHatYmin = 110;
-    int dzRightHatYmax = 120;
-    int dzRightHatXmin = 110;
-    int dzRightHatXmax = 120;
+    int dzLeftHatYmin  = 108;
+    int dzLeftHatYmax  = 130;
+    int dzLeftHatXmin  = 120;
+    int dzLeftHatXmax  = 130;
+    int dzLeftHatY = 128;
+    int dzLeftHatX = 125;
+    int dzRightHatYmin = 125;
+    int dzRightHatYmax = 140;
+    int dzRightHatXmin = 135;
+    int dzRightHatXmax = 150;
+    int dzRightHatX = 140;
+    int dzRightHatY = 128;
 
     //Packet Parsing Buffers 
     char subtext3[4];   //3 Digit Buffer
     char subtext1[2];   //1 Digit Buffer
-    uint8_t parseBuffer[32] = {0};
+    
     while(1)
     {
         //"#99000000134111154132000000999#"
@@ -195,17 +226,14 @@ void packetParser()
             memcpy(subtext3, &parseBuffer[3], 3);
             subtext3[3] = '\0';
             sscanf(subtext3, "%d", &L1);
-            if(L1<dzTriggers){L1 = 0;}
             //L2
             memcpy(subtext3, &parseBuffer[6], 3);
             subtext3[3] = '\0';
             sscanf(subtext3, "%d", &L2);
-            if(L2<dzTriggers){L2 = 0;}
             //LeftHatX
             memcpy(subtext3, &parseBuffer[9], 3);
             subtext3[3] = '\0';
             sscanf(subtext3, "%d", &LeftHatX);
-            if(LeftHatX>dzLeftHatXmin && LeftHatX<dzLeftHatXmax){LeftHatX=115;}
             //LeftHatY
             memcpy(subtext3, &parseBuffer[12], 3);
             subtext3[3] = '\0';
@@ -251,19 +279,15 @@ void packetParser()
 void motorControl()
 {
     //Thread that controls PWM signal outputs within parameters below, uses global parsed data
-    //Initialize PWM: 4.1ms Period | 243Hz | 0-65535
-    //PWM: 4100us = 65535
-    //Forward: 1860us = 29730
-    //Reverse: 1060us = 16944
-    //Stop: 1480us = 23657
+    //New PWM: 400Hz | 2.5ms | 0 - 2500
 
     //Define max and min PWM's 
-    int maxPowa = 29730; 
-    int minPowa = 16944;
-    int stopPowa = 23657;
-    //float maxPowa = 48.0;
-    //float minPowa = 28.0;
-    //float stopPowa = 38.0;
+   /* int maxPowa = 1860; 
+    int minPowa = 1060;
+    int stopPowa = 1480;*/
+    int maxPowa = 1620; 
+    int minPowa = 1300;
+    int stopPowa = 1480;
 
     int motor1DC = stopPowa; 
     int motor2DC = stopPowa;
@@ -283,7 +307,7 @@ void motorControl()
     
     while (1)
     {
-        if(MOTORSOFF)
+        if (!motorsToggle)
         {
             int motor1DC = stopPowa; 
             int motor2DC = stopPowa;
@@ -300,24 +324,55 @@ void motorControl()
             TIM10->CCR1 = motor6DC; //Back  L - TIM10 Ch1 AF3
         }
 
-        thread_sleep_for(5);
-
         if (L1 > 5 && L2 < 5)
         {
-            motor1DC = map(L1, 0, 255, stopPowa, maxPowa);
-            motor1DC = map(L1, 0, 255, stopPowa, maxPowa);
+            motor1DC = customMap(L1, 0, 255, stopPowa, maxPowa);
+            motor2DC = customMap(L1, 0, 255, stopPowa, maxPowa);
         }
-        if (L2 > 5 && L1 < 5)
+        else if (L2 > 5 && L1 < 5)
         {
-            motor1DC = map(L2, 0, 255, stopPowa, minPowa);
-            motor1DC = map(L2, 0, 255, stopPowa, minPowa);   
+            motor1DC = customMap(L2, 0, 255, stopPowa, minPowa);
+            motor2DC = customMap(L2, 0, 255, stopPowa, minPowa);   
+        }
+        else
+        {
+            motor1DC = stopPowa; 
+            motor2DC = stopPowa;
         }
 
-        motor3DC = map(RightHatY, 255, 0, minPowa, maxPowa); 
-        motor4DC = map(LeftHatY, 255, 0, minPowa, maxPowa); 
-        motor5DC = map(RightHatY, 255, 0, minPowa, maxPowa); 
-        motor6DC = map(LeftHatY, 255, 0, minPowa, maxPowa);
+        if(LeftHatY > 129) //129 - 255 Reverse
+        {
+            motor4DC = customMap(LeftHatY, 129, 255, stopPowa, minPowa); 
+            motor6DC = customMap(LeftHatY, 129, 255, stopPowa, minPowa);
+        }
+        else if(LeftHatY < 127)
+        {
+            motor4DC = customMap(LeftHatY, 0, 127, maxPowa, stopPowa); 
+            motor6DC = customMap(LeftHatY, 0, 127, maxPowa, stopPowa);
+        }
+        else
+        {
+            motor4DC = stopPowa;
+            motor6DC = stopPowa;
+        }
 
+        if(RightHatY > 129)
+        {
+            motor3DC = customMap(RightHatY, 129, 255, stopPowa, minPowa); 
+            motor5DC = customMap(RightHatY, 129, 255, stopPowa, minPowa);
+        }
+        else if(RightHatY < 127)
+        {
+            motor3DC = customMap(RightHatY, 0, 127, maxPowa, stopPowa); 
+            motor5DC = customMap(RightHatY, 0, 127, maxPowa, stopPowa);
+        }
+        else 
+        {
+            motor3DC = stopPowa;
+            motor5DC = stopPowa;
+        }
+
+        thread_sleep_for(5);
         TIM4->CCR1 =  motor1DC;  //Front Z - TIM4  Ch2 AF2
         TIM4->CCR2 =  motor2DC;  //Rear  Z - TIM4  Ch1 AF2
         TIM9->CCR2 =  motor3DC;  //Front R - TIM9  Ch2 AF3
@@ -347,9 +402,9 @@ void readIMUData()
     EZ.Half[0] = EZlsb;
     EZ.Half[1] = EZmsb;
 
-    Xval = map(abs(EX.Whole), 0, 5900, 0, 200);
-    Yval = map(abs(EY.Whole), -1440, 1440, 0, 200);
-    Zval = map(abs(EZ.Whole), -2880, 2880, 0, 200);
+    Xval = customMap(abs(EX.Whole), 0, 5900, 0, 200);
+    Yval = customMap(abs(EY.Whole), -1440, 1440, 0, 200);
+    Zval = customMap(abs(EZ.Whole), -2880, 2880, 0, 200);
 
     //printf("IMU Data: X = %d Y = %d Z = %d \n", Xval, Yval, Zval);
 }
@@ -413,7 +468,7 @@ void readPressureSensor()
     Pres = (((uncompPres * SENS / 2097152.0 - OFF) / 8192.0) /10.0);
 
     truncTemp = (uint8_t)Temp;
-    Depth = map(Pres, 1000, 10000, 0, 100);
+    Depth = customMap(Pres, 1000, 10000, 0, 100);
 
     //printf("\n \n trunc: %d depth: %d \n \n", truncTemp, Depth);
     //printf("Pressure = %0.0f mbar \n", Pres);
@@ -463,7 +518,15 @@ void createTransmitPacket()
         buffer /= 10;
     }
 
+    buffer = transmitPacketCount++;
+    for(int i = 1; i < 2; i--)
+    {
+        arrayBuffer[i] = buffer % 10;
+        buffer /= 10;
+    }
+
     memcpy(RS485_TxData, &arrayBuffer, 32);
+    DMA_Start_Transmit();
 }
 
 void getIMUreg(uint8_t register_pointerLSB, uint8_t register_pointerMSB, uint8_t* receive_bufferLSB, uint8_t* receive_bufferMSB)
@@ -500,22 +563,7 @@ void DMA_Start_Transmit(void)
     LL_DMA_EnableStream(DMA1, LL_DMA_STREAM_3); 
 }
 
-void USART_Process_Data() 
-{
-    //Check sum will go here before newData is set to true
-    memcpy(RS485_RxData, &RS485_RxDataBuf, 32);
-    if(RS485_RxData[0]=='#')
-    {
-        newData = true; //Parse a packet
-    }
-    //Need to add: 
-    //Checksum calculation on Rx packet
-    //Checksum compare on Rx packet (if != newData false)
-    //Need to check packet starts and ends with # else newData false
-    //Parse packet count if packet count ++ then packet iss good if not then subtract ot determine how many packets are lost
-}
-
-long map(long x, long in_min, long in_max, long out_min, long out_max) 
+int customMap(int x, int in_min, int in_max, int out_min, int out_max) 
 {
     return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min; 
 }
@@ -634,7 +682,7 @@ static void USART3_UART_Init(void)
 
     //DMA interrupt init for Tx
     LL_DMA_EnableIT_TC(DMA1, LL_DMA_STREAM_3);
-    NVIC_SetPriority(DMA1_Stream3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));//was 1
+    NVIC_SetPriority(DMA1_Stream3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 1));//was 1
     NVIC_EnableIRQ(DMA1_Stream3_IRQn);
 
     //USART Config (Tx done in DMA transmit function)
@@ -664,6 +712,8 @@ static void TIM4_Init(void)
     //APB1 @ 42MHz - we want ~400Hz or 2.5ms
     //Formula: Timer Frequency = (Bus Clock / Prescaler) / Period
     //                          400Hz = (42MHz / 42) / 2500 
+    //789Hz or 781 = (BusClk / 42) / 2500
+    //400 = (82000000 /)
 
     __HAL_RCC_TIM4_CLK_ENABLE();
 
@@ -673,7 +723,7 @@ static void TIM4_Init(void)
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
     htim4.Instance = TIM4;
-    htim4.Init.Prescaler = 42;
+    htim4.Init.Prescaler = 83;
     htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
     htim4.Init.Period = 2500;
     htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -731,7 +781,7 @@ static void TIM9_Init(void)
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
     htim9.Instance = TIM9;
-    htim9.Init.Prescaler = 84;
+    htim9.Init.Prescaler = 167;
     htim9.Init.CounterMode = TIM_COUNTERMODE_UP;
     htim9.Init.Period = 2500;
     htim9.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -777,7 +827,7 @@ static void TIM10_Init(void)
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
     htim10.Instance = TIM10;
-    htim10.Init.Prescaler = 84;
+    htim10.Init.Prescaler = 167;
     htim10.Init.CounterMode = TIM_COUNTERMODE_UP;
     htim10.Init.Period = 2500;
     htim10.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -817,7 +867,7 @@ static void TIM11_Init(void)
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
     htim11.Instance = TIM11;
-    htim11.Init.Prescaler = 84;
+    htim11.Init.Prescaler = 167;
     htim11.Init.CounterMode = TIM_COUNTERMODE_UP;
     htim11.Init.Period = 2500;
     htim11.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -857,7 +907,7 @@ static void TIM13_Init(void)
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
     htim13.Instance = TIM13;
-    htim13.Init.Prescaler = 42;
+    htim13.Init.Prescaler = 83;
     htim13.Init.CounterMode = TIM_COUNTERMODE_UP;
     htim13.Init.Period = 2500;
     htim13.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -895,7 +945,7 @@ void DMA1_Stream1_IRQHandler(void)
     if (LL_DMA_IsEnabledIT_TC(DMA1, LL_DMA_STREAM_1) && LL_DMA_IsActiveFlag_TC1(DMA1)) 
     {
         LL_DMA_ClearFlag_TC1(DMA1);             //Clear transfer complete flag 
-        USART_Process_Data();                       //Filter received data
+        startFilterFlag = true;
     }
 }
 
@@ -914,7 +964,7 @@ void USART3_IRQHandler(void)
     if (LL_USART_IsEnabledIT_IDLE(USART3) && LL_USART_IsActiveFlag_IDLE(USART3))
     {
         LL_USART_ClearFlag_IDLE(USART3);        //Clear IDLE line Flag
-        USART_Process_Data();                       //Filter received data
+        startFilterFlag = true;
     }
 }
 
