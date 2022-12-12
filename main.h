@@ -28,13 +28,13 @@ static void TIM9_Init(void);
 static void TIM10_Init(void);
 static void TIM11_Init(void);
 static void TIM13_Init(void);
+static void I2C1_Init(void);
 
 //Active Functions
 int customMap(int x, int in_min, int in_max, int out_min, int out_max);
 void packetParser(); //Operates in its own thread
 void Error_Handler(void);
 void motorControl();
-void USART_Process_Data();
 void DMA_Start_Transmit(void);
 void readIMUData();
 void readPressureSensor();

@@ -25,3 +25,7 @@ https://www.st.com/resource/en/reference_manual/dm00031020-stm32f405-415-stm32f4
 https://os.mbed.com/docs/mbed-os/v6.15/apis/thread.html
 https://forum.arduino.cc/t/simple-nrf24l01-2-4ghz-transceiver-demo/405123
 https://os.mbed.com/users/belloula/code/mbed_blinko//file/84c281baac9c/main.cpp/
+https://docs.bluerobotics.com/besc/
+https://stackoverflow.com/questions/39546376/shift-array-elements
+https://www.programiz.com/cpp-programming/examples/average-arrays
+https://bluerobotics.com/store/thrusters/t100-t200-thrusters/t200-thruster-r2-rp/

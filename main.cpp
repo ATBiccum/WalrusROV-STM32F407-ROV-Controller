@@ -1,17 +1,22 @@
 /* Walrus ROV
  * STM32F4 ROV Controller
- * 06/11/2022
  * 
- * Processor:
- * STM32F407ZGT6
+ * Objective: Send 6 x smoothed PWM signals to ESC's with values dependent on received controls over 
+ * UART (RS422 chips -> UART) using DMA for UART receive. Has connection lost built into DMA 
+ * buffers filter. Additionally sends sensor data from an IMU module and pressure sensor module
+ * over UART to RS422 chips. 
+ * 
  */
 
 #include <mbed.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <vector>
+#include <algorithm>
 #include "main.h" 
 #include "cmsis.h"
+#include <watchdog_api.h>
 
 #define ARRAY_LEN(x)            (sizeof(x) / sizeof((x)[0]))
 
@@ -25,10 +30,10 @@ TIM_HandleTypeDef htim10;
 TIM_HandleTypeDef htim11;
 TIM_HandleTypeDef htim13;
 
-Thread packetParserThread; //Thread to parse packets into below variables
-Thread motorControlThread; //Thread that takes parsed packet data and customMaps to DC for motors 
+Thread packetParserThread; //Thread to parse packets
+Thread motorControlThread; //Thread that takes parsed packet data and maps to duty cycle for motors 
 
-//Packet from Control Station Parsed Variables
+//Parsed Variables for Controls
 int L1;
 int L2;
 int LeftHatX;
@@ -42,22 +47,26 @@ int Circle;
 int Cross;
 int Square;
 
-//RS485 Tx and Rx Variables
-uint8_t RS485_RxDataBuf[1000] = {0};
-uint8_t RS485_RxData[32] = {0}; //"#99RANDOMSENSORDATABABYOHYA999#"
-uint8_t RS485_TxData[32] = "#9900000000000000000000000999#"; //"#99000000134111154132000000999#"
-size_t old_posRx;
-size_t posRx;
-bool newData = false;
-uint8_t parseBuffer[100] = {0};
+//RS422 Tx and Rx Variables
+uint8_t RS422_RxDataBuf[500] = {0};
+uint8_t RS422_RxData[500] = {0}; 
+uint8_t RS422_TxData[32] = "#9900000000000000000000000999#";
+uint8_t parseBuffer[32] = {0};
 char subtext2[2] = {0};
-bool startFilterFlag = false;
 
+//Packet Count Variables
 int newPacketCount = 0;
 int oldPacketCount = 0;
 int transmitPacketCount = 0;
 
+//Flags
+bool newData = false;
 bool motorsToggle = false; 
+bool startFilterFlag = false;
+
+//Packet Parsing Buffers 
+char subtext3[4] = {0};   //3 Digit Buffer
+char subtext1[2] = {0};   //1 Digit Buffer
 
 //IMU Variables
 uint8_t eulXLSB = 0x1A;
@@ -103,19 +112,30 @@ typedef union _BYTE_TO_UINT32
     unsigned int Whole;
 }_BYTE_TO_UINT32;
 
+Watchdog &watchdog = Watchdog::get_instance(); 
+//This part might be important to ensure function after power cycle
+//Seems to work aight, might need to mess with timer duration
+//Seems to be ok though...
+
 int main()
 {
+
+    // thread_sleep_for(150); //added to see if there needed to be a small break before beginning the setup stuff...
+    // hal_watchdog_init(1);
+    // hal_watchdog_init(const watchdog_config_t *config);
+    
+    watchdog.start(1000);
+    /***INITIALIZATIONS***/
     NVIC_SetPriorityGrouping(NVIC_PRIORITYGROUP_4);
     
     HAL_Init();
     GPIO_Init();           
-
+    //Timer Initialization for PWM outputs
     TIM4_Init();
     TIM9_Init();
     TIM10_Init();
     TIM11_Init();
     TIM13_Init();
-
     HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
     HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
     HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_2);
@@ -123,13 +143,14 @@ int main()
     HAL_TIM_PWM_Start(&htim11, TIM_CHANNEL_1);
     HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);
     
-    //I2C1_Init();
+    //I2C1_Init();                 //Initialize I2C for sensors
     USART2_UART_Init();          //Initialize UART2 for the Serial Monitor
-    USART3_UART_Init();          //Initialize UART3 for RS485 Coms
-    DMA_Start_Transmit();        //Start DMA Transmission on UART3 for RS485
+    USART3_UART_Init();          //Initialize UART3 for RS422 Coms
+    /***END INITIALIZATIONS***/
 
+    DMA_Start_Transmit();        //Start DMA Transmission on UART3 for RS422
     motorControlThread.start(motorControl);     //Start Motor Control (Init's as OFF)
-    packetParserThread.start(packetParser);     //Start Parsing of Received Wireless Packets 
+    //packetParserThread.start(packetParser);     //Start Parsing of Received Wireless Packets 
 /*
     //Mode Select Address and Value
     Mode[0] = 0x3D;
@@ -150,235 +171,301 @@ int main()
     while(1)
     {
         //printf("L1:%d|L2:%d|LeftHatX:%d|LeftHatY:%d|RightHatX:%d|RightHatY:%d|R1:%d|R2:%d|Triangle:%d|Circle:%d|Cross:%d|Square:%d|\n", L1, L2, LeftHatX, LeftHatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square);
-       /*
-        readIMUData();
-        readPressureSensor();
+       
+        //readIMUData();          //Gather IMU data for X, Y, Z position
+        //readPressureSensor();   //Gather pressure sensor data for depth and temperature 
+        //createTransmitPacket(); //Populate the sending packet with sensor data
+        
+        watchdog.kick();
 
-        createTransmitPacket();
-        */
+       
 
-        if(startFilterFlag) //Filter a received packet from RS485
+        /***START FILTER***/
+        //Filter for DMA buffer to select good packets with conection lost check
+        if(startFilterFlag) //Flag set in DMA or UART idle line interrupts
         {
-            //Packet Format: "#99000000134111154132000000999#"
-            for(int i = 0; i < 1000; i++) //Process Rx by filtering through 1000 byte buffer and grab a packet
+            //Sample Packet: "#99000000134111154132000000999#"
+            memcpy(RS422_RxDataBuf, &RS422_RxData, 500);
+            for(int i = 0; i < 500; i++) //Filter through 500 byte buffer and grab a packet
             {
-                if(RS485_RxDataBuf[i] == '#' && RS485_RxDataBuf[i+32] == '#') //Check for a # at start and end of packet
+                if(RS422_RxDataBuf[i] == '#' && (RS422_RxDataBuf[i+32] == '#')) //Check for a # at start and end of packet
                 {
-                    memcpy(subtext2, &RS485_RxDataBuf[i+1], 2);
-                    sscanf(subtext2, "%d", &newPacketCount);
-                    
-                    if(newPacketCount != oldPacketCount) //Check packet count is not equal to old packet number
-                    {
-                        memcpy(RS485_RxData, &RS485_RxDataBuf[i], 32);
-                        newData = true;
-                        motorsToggle = true;
-                        oldPacketCount = newPacketCount;
+                    memcpy(subtext2, &RS422_RxDataBuf[i+1], 2); //Parse out the packet counter
+                    sscanf(subtext2, "%d", &newPacketCount);    //Convert packet count to int
 
-                        HAL_UART_Transmit(&huart2, (uint8_t *)RS485_RxData, 32, 100);
-                    }
-                    else
+                    //ex. new = 5, old = 4 OR new = 1, old = 99
+                    if(newPacketCount != oldPacketCount)        
                     {
-                        motorsToggle = false;
+                        memcpy(parseBuffer, &RS422_RxDataBuf[i], 32); //Move received data into a buffer to be parsed
+                        oldPacketCount = newPacketCount;
+                        motorsToggle = true;
+                        HAL_UART_Transmit(&huart2, (uint8_t *)parseBuffer, 32, 100); //Send filtered packet over debug pin
+
+                        //L1
+                        memcpy(subtext3, &parseBuffer[3], 3);
+                        subtext3[3] = '\0';
+                        sscanf(subtext3, "%d", &L1);
+                        //L2
+                        memcpy(subtext3, &parseBuffer[6], 3);
+                        subtext3[3] = '\0';
+                        sscanf(subtext3, "%d", &L2);
+                        //LeftHatX
+                        memcpy(subtext3, &parseBuffer[9], 3);
+                        subtext3[3] = '\0';
+                        sscanf(subtext3, "%d", &LeftHatX);
+                        //LeftHatY
+                        memcpy(subtext3, &parseBuffer[12], 3);
+                        subtext3[3] = '\0';
+                        sscanf(subtext3, "%d", &LeftHatY);
+                        //RightHatX
+                        memcpy(subtext3, &parseBuffer[15], 3);
+                        subtext3[3] = '\0';
+                        sscanf(subtext3, "%d", &RightHatX);
+                        //RightHatY
+                        memcpy(subtext3, &parseBuffer[18], 3);
+                        subtext3[3] = '\0';
+                        sscanf(subtext3, "%d", &RightHatY);
+                        //R1
+                        memcpy(subtext1, &parseBuffer[19], 1);
+                        subtext1[1] = '\0';
+                        sscanf(subtext1, "%d", &R1);
+                        //R2
+                        memcpy(subtext1, &parseBuffer[20], 1);
+                        subtext1[1] = '\0';
+                        sscanf(subtext1, "%d", &R2);
+                        //Triangle
+                        memcpy(subtext1, &parseBuffer[21], 1);
+                        subtext1[1] = '\0';
+                        sscanf(subtext1, "%d", &Triangle);
+                        //Circle
+                        memcpy(subtext1, &parseBuffer[22], 1);
+                        subtext1[1] = '\0';
+                        sscanf(subtext1, "%d", &Circle);           
+                        //Cross
+                        memcpy(subtext1, &parseBuffer[23], 1);
+                        subtext1[1] = '\0';
+                        sscanf(subtext1, "%d", &Cross);
+                        //Square
+                        memcpy(subtext1, &parseBuffer[24], 1);
+                        subtext1[1] = '\0';
+                        sscanf(subtext1, "%d", &Square);  
+                        thread_sleep_for(5); //Relieve time for CPU to handle other processes
+                    }
+                    //If new == old conncection has been lost
+                    else 
+                    {
+                        motorsToggle = false; //Turn off all motors
                     }
                 }
             }
         }
+        /***END FILTER***/
     }
 }
-
 
 /***THREADS***/
-void packetParser()
-{
-    //This thread runs continuously checking is newData bool is true. 
-    //If so; performs a single parse and resets newData variable.
-    //Tested Deadzone Packets:
-    //#13000000126106137129000000323#
-    //#19000000127111149138000000341#
-
-    //Deadzone variables
-    int dzTriggers = 5;
-    int dzLeftHatYmin  = 108;
-    int dzLeftHatYmax  = 130;
-    int dzLeftHatXmin  = 120;
-    int dzLeftHatXmax  = 130;
-    int dzLeftHatY = 128;
-    int dzLeftHatX = 125;
-    int dzRightHatYmin = 125;
-    int dzRightHatYmax = 140;
-    int dzRightHatXmin = 135;
-    int dzRightHatXmax = 150;
-    int dzRightHatX = 140;
-    int dzRightHatY = 128;
-
-    //Packet Parsing Buffers 
-    char subtext3[4];   //3 Digit Buffer
-    char subtext1[2];   //1 Digit Buffer
-    
-    while(1)
-    {
-        //"#99000000134111154132000000999#"
-        if(newData)
-        {
-            memcpy(parseBuffer, &RS485_RxData, 32);
-
-            //L1
-            memcpy(subtext3, &parseBuffer[3], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &L1);
-            //L2
-            memcpy(subtext3, &parseBuffer[6], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &L2);
-            //LeftHatX
-            memcpy(subtext3, &parseBuffer[9], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &LeftHatX);
-            //LeftHatY
-            memcpy(subtext3, &parseBuffer[12], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &LeftHatY);
-            //RightHatX
-            memcpy(subtext3, &parseBuffer[15], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &RightHatX);
-            //RightHatY
-            memcpy(subtext3, &parseBuffer[18], 3);
-            subtext3[3] = '\0';
-            sscanf(subtext3, "%d", &RightHatY);
-            //R1
-            memcpy(subtext1, &parseBuffer[19], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &R1);
-            //R2
-            memcpy(subtext1, &parseBuffer[20], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &R2);
-            //Triangle
-            memcpy(subtext1, &parseBuffer[21], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &Triangle);
-            //Circle
-            memcpy(subtext1, &parseBuffer[22], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &Circle);           
-            //Cross
-            memcpy(subtext1, &parseBuffer[23], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &Cross);
-            //Square
-            memcpy(subtext1, &parseBuffer[24], 1);
-            subtext1[1] = '\0';
-            sscanf(subtext1, "%d", &Square);     
-
-            newData = false; //Reset new data state
-        }
-    }
-}
 
 void motorControl()
 {
-    //Thread that controls PWM signal outputs within parameters below, uses global parsed data
-    //New PWM: 400Hz | 2.5ms | 0 - 2500
+    //Thread that controls PWM signal outputs, uses data from parse packet thread
+    //New PWM: 400Hz | 2.5ms | 0 - 2500 | Max: 1860us | Stop: 1500us | Min: 1060us
+    //Motor control operation: Initialize all ESC's with stop of 1500us for 4 seconds and populate large arrays with stop as well.
+    //In while loop, check if motorsoff flag is triggered, to shut all motors off. (Ex. lost connection)
+    //Maps the parsed variables from controls to us values into index 0 of each array for the PWM outputs.
+    //Shifts all arrays to the right, so updated value is now index 1.
+    //Takes the average of the array, and writes that to the PWM output.
+    //PWM is smoothed as the moving average ensures if full throttle is held, it takes time to populate the array with max values.
 
-    //Define max and min PWM's 
-   /* int maxPowa = 1860; 
-    int minPowa = 1060;
-    int stopPowa = 1480;*/
-    int maxPowa = 1620; 
-    int minPowa = 1300;
-    int stopPowa = 1480;
+    //Define max and min power
+    int maxPower = 1650; 
+    int minPower = 1350;
+    int stopPower = 1500;
 
-    int motor1DC = stopPowa; 
-    int motor2DC = stopPowa;
-    int motor3DC = stopPowa;
-    int motor4DC = stopPowa;
-    int motor5DC = stopPowa;
-    int motor6DC = stopPowa;
+    const int n = 200; //Array size for averaging 
+    //Initialize Arrays
+    vector<int> motor1DCarray(n); 
+    vector<int> motor2DCarray(n); 
+    vector<int> motor3DCarray(n); 
+    vector<int> motor4DCarray(n); 
+    vector<int> motor5DCarray(n); 
+    vector<int> motor6DCarray(n); 
+    //Initalize Averages at stop
+    int motor1DCavg = stopPower; 
+    int motor2DCavg = stopPower;
+    int motor3DCavg = stopPower;
+    int motor4DCavg = stopPower;
+    int motor5DCavg = stopPower;
+    int motor6DCavg = stopPower;
 
-    TIM4->CCR1 =  motor1DC;  //Front Z - TIM4  Ch2 AF2
-    TIM4->CCR2 =  motor2DC;  //Rear  Z - TIM4  Ch1 AF2
-    TIM9->CCR2 =  motor3DC;  //Front R - TIM9  Ch2 AF3
-    TIM13->CCR1 = motor4DC; //Front L - TIM13 Ch1 AF9
-    TIM11->CCR1 = motor5DC; //Back  R - TIM11 Ch1 AF3
-    TIM10->CCR1 = motor6DC; //Back  L - TIM10 Ch1 AF3
+    /***FILL ARRAYS***/
+    for(int i = 0; i < n; i++)
+    {
+        motor1DCarray[i] = stopPower; //Fill arrays with stop power
+    }
+    for(int i = 0; i < n; i++)
+    {
+        motor2DCarray[i] = stopPower;
+    }
+    for(int i = 0; i < n; i++)
+    {
+        motor3DCarray[i] = stopPower;
+    }
+    for(int i = 0; i < n; i++)
+    {
+        motor4DCarray[i] = stopPower;
+    }
+    for(int i = 0; i < n; i++)
+    {
+        motor5DCarray[i] = stopPower;
+    }
+    for(int i = 0; i < n; i++)
+    {
+        motor6DCarray[i] = stopPower;
+    }
+    /***WRITE TO PWM OUT***/
+    TIM4->CCR1 =  stopPower;  //Rear  L
+    TIM4->CCR2 =  stopPower;  //Front R
+    TIM9->CCR2 =  stopPower;  //Rear  R
+    TIM13->CCR1 = stopPower;  //Front L
+    TIM11->CCR1 = stopPower;  //Back  Z
+    TIM10->CCR1 = stopPower;  //Front Z
     
-    thread_sleep_for(10000);
-    
+    thread_sleep_for(2000); //Delay 4 seconds to allow ESC's to initialize
+    /***MAIN MOTOR CONTROL LOOP***/
     while (1)
     {
-        if (!motorsToggle)
+        watchdog.kick();
+        if (!motorsToggle) //Turn all motors OFF case
         {
-            int motor1DC = stopPowa; 
-            int motor2DC = stopPowa;
-            int motor3DC = stopPowa;
-            int motor4DC = stopPowa;
-            int motor5DC = stopPowa;
-            int motor6DC = stopPowa;
-
-            TIM4->CCR1 =  motor1DC;  //Front Z - TIM4  Ch2 AF2
-            TIM4->CCR2 =  motor2DC;  //Rear  Z - TIM4  Ch1 AF2
-            TIM9->CCR2 =  motor3DC;  //Front R - TIM9  Ch2 AF3
-            TIM13->CCR1 = motor4DC; //Front L - TIM13 Ch1 AF9
-            TIM11->CCR1 = motor5DC; //Back  R - TIM11 Ch1 AF3
-            TIM10->CCR1 = motor6DC; //Back  L - TIM10 Ch1 AF3
+            /***WRITE TO PWM OUT***/
+            TIM4->CCR1 =  stopPower;  //Rear  L
+            TIM4->CCR2 =  stopPower;  //Front R
+            TIM9->CCR2 =  stopPower;  //Rear  R
+            TIM13->CCR1 = stopPower;  //Front L
+            TIM11->CCR1 = stopPower;  //Back  Z
+            TIM10->CCR1 = stopPower;  //Front Z
         }
 
+        /***MAP ARRAYS***/
+        //
         if (L1 > 5 && L2 < 5)
         {
-            motor1DC = customMap(L1, 0, 255, stopPowa, maxPowa);
-            motor2DC = customMap(L1, 0, 255, stopPowa, maxPowa);
+            motor5DCarray[0] = customMap(L1, 0, 255, stopPower, maxPower); 
+            motor6DCarray[0] = customMap(L1, 0, 255, stopPower, maxPower);
         }
         else if (L2 > 5 && L1 < 5)
         {
-            motor1DC = customMap(L2, 0, 255, stopPowa, minPowa);
-            motor2DC = customMap(L2, 0, 255, stopPowa, minPowa);   
+            motor5DCarray[0] = customMap(L2, 0, 255, stopPower, minPower);
+            motor6DCarray[0] = customMap(L2, 0, 255, stopPower, minPower);   
         }
         else
         {
-            motor1DC = stopPowa; 
-            motor2DC = stopPowa;
+            motor5DCarray[0] = stopPower; 
+            motor6DCarray[0] = stopPower;
         }
 
         if(LeftHatY > 129) //129 - 255 Reverse
         {
-            motor4DC = customMap(LeftHatY, 129, 255, stopPowa, minPowa); 
-            motor6DC = customMap(LeftHatY, 129, 255, stopPowa, minPowa);
+            motor1DCarray[0] = customMap(LeftHatY, 129, 255, stopPower, maxPower); 
+            motor4DCarray[0] = customMap(LeftHatY, 129, 255, stopPower, minPower);
         }
         else if(LeftHatY < 127)
         {
-            motor4DC = customMap(LeftHatY, 0, 127, maxPowa, stopPowa); 
-            motor6DC = customMap(LeftHatY, 0, 127, maxPowa, stopPowa);
+            motor1DCarray[0] = customMap(LeftHatY, 0, 127, minPower, stopPower); 
+            motor4DCarray[0] = customMap(LeftHatY, 0, 127, maxPower, stopPower);
         }
         else
         {
-            motor4DC = stopPowa;
-            motor6DC = stopPowa;
+            motor1DCarray[0] = stopPower;
+            motor4DCarray[0] = stopPower;
         }
 
         if(RightHatY > 129)
         {
-            motor3DC = customMap(RightHatY, 129, 255, stopPowa, minPowa); 
-            motor5DC = customMap(RightHatY, 129, 255, stopPowa, minPowa);
+            motor2DCarray[0] = customMap(RightHatY, 129, 255, stopPower, minPower); 
+            motor3DCarray[0] = customMap(RightHatY, 129, 255, stopPower, minPower);
         }
         else if(RightHatY < 127)
         {
-            motor3DC = customMap(RightHatY, 0, 127, maxPowa, stopPowa); 
-            motor5DC = customMap(RightHatY, 0, 127, maxPowa, stopPowa);
+            motor2DCarray[0] = customMap(RightHatY, 0, 127, maxPower, stopPower); 
+            motor3DCarray[0] = customMap(RightHatY, 0, 127, maxPower, stopPower);
         }
         else 
         {
-            motor3DC = stopPowa;
-            motor5DC = stopPowa;
+            motor2DCarray[0]= stopPower;
+            motor3DCarray[0] = stopPower;
         }
 
-        thread_sleep_for(5);
-        TIM4->CCR1 =  motor1DC;  //Front Z - TIM4  Ch2 AF2
-        TIM4->CCR2 =  motor2DC;  //Rear  Z - TIM4  Ch1 AF2
-        TIM9->CCR2 =  motor3DC;  //Front R - TIM9  Ch2 AF3
-        TIM13->CCR1 = motor4DC; //Front L - TIM13 Ch1 AF9
-        TIM11->CCR1 = motor5DC; //Back  R - TIM11 Ch1 AF3
-        TIM10->CCR1 = motor6DC; //Back  L - TIM10 Ch1 AF3
+        /***SHIFT ARRAYS***/
+        for(int i=n; i>=0; i--) 
+        {
+            motor1DCarray[i+1] = motor1DCarray[i]; 
+        }
+
+        for(int i=n; i>=0; i--)
+        {
+            motor2DCarray[i+1] = motor2DCarray[i]; 
+        }
+
+        for(int i=n; i>=0; i--)
+        {
+            motor3DCarray[i+1] = motor3DCarray[i]; 
+        }
+        
+        for(int i=n; i>=0; i--)
+        {
+            motor4DCarray[i+1] = motor4DCarray[i]; 
+        }
+
+        for(int i=n; i>=0; i--)
+        {
+            motor5DCarray[i+1] = motor5DCarray[i]; 
+        }
+
+        for(int i=n; i>=0; i--)
+        {
+            motor6DCarray[i+1] = motor6DCarray[i]; 
+        }
+
+        /***AVERAGE ARRAYS***/
+        for(int i = 1; i<n; ++i)
+        {
+            motor1DCavg += motor1DCarray[i];
+        }
+        motor1DCavg = motor1DCavg/n; 
+        for(int i = 1; i<n; ++i)
+        {
+            motor2DCavg += motor2DCarray[i];
+        }
+        motor2DCavg = motor2DCavg/n;
+        for(int i = 1; i<n; ++i)
+        {
+            motor3DCavg += motor3DCarray[i];
+        }
+        motor3DCavg = motor3DCavg/n;
+        for(int i = 1; i<n; ++i)
+        {
+            motor4DCavg += motor4DCarray[i];
+        }
+        motor4DCavg = motor4DCavg/n;
+        for(int i = 1; i<n; ++i)
+        {
+            motor5DCavg += motor5DCarray[i];
+        }
+        motor5DCavg = motor5DCavg/n;
+        for(int i = 1; i<n; ++i)
+        {
+            motor6DCavg += motor6DCarray[i];
+        }
+        motor6DCavg = motor6DCavg/n;
+
+        //***WRITE TO PWM OUT***/
+        TIM4->CCR1 =  motor1DCavg;  //Rear  L
+        TIM4->CCR2 =  motor2DCavg;  //Front R
+        TIM9->CCR2 =  motor3DCavg;  //Rear  R
+        TIM13->CCR1 = motor4DCavg;  //Front L
+        TIM11->CCR1 = motor5DCavg;  //Back  Z
+        TIM10->CCR1 = motor6DCavg;  //Front Z
     }
 }
 
@@ -477,7 +564,7 @@ void readPressureSensor()
 void createTransmitPacket()
 {
     //Receive IMU data make packet 
-    //RS485_TxData fill with sensor shit
+    //RS422_TxData fill with sensor shit
     //    IMX IMY IMZ Dep Tem
     //#99 000 000 000 000 00
     //#99 000 000 000 000 000 0 0 0 0 0 0 0 0 999#
@@ -525,7 +612,7 @@ void createTransmitPacket()
         buffer /= 10;
     }
 
-    memcpy(RS485_TxData, &arrayBuffer, 32);
+    memcpy(RS422_TxData, &arrayBuffer, 32);
     DMA_Start_Transmit();
 }
 
@@ -548,9 +635,9 @@ void DMA_Start_Transmit(void)
     //Disable the channel or stream to be reconfigured before Tx
     LL_DMA_DisableStream(DMA1, LL_DMA_STREAM_3);
     //Configure DMA memory addresses for UART to grab from
-    LL_DMA_SetMemoryAddress(DMA1, LL_DMA_STREAM_3, (uint32_t)RS485_TxData);
+    LL_DMA_SetMemoryAddress(DMA1, LL_DMA_STREAM_3, (uint32_t)RS422_TxData);
     //Configure DMA length (number of bytes to transmit)
-    LL_DMA_SetDataLength(DMA1, LL_DMA_STREAM_3, ARRAY_LEN(RS485_TxData));
+    LL_DMA_SetDataLength(DMA1, LL_DMA_STREAM_3, ARRAY_LEN(RS422_TxData));
     LL_DMA_SetDataLength(DMA1, LL_DMA_STREAM_3, 32);
     //Enabe UART DMA Tx Request
     LL_USART_EnableDMAReq_TX(USART3); //this line freeze
@@ -659,8 +746,8 @@ static void USART3_UART_Init(void)
     LL_DMA_SetMemorySize(DMA1, LL_DMA_STREAM_1, LL_DMA_MDATAALIGN_BYTE);
     LL_DMA_DisableFifoMode(DMA1, LL_DMA_STREAM_1);
     LL_DMA_SetPeriphAddress(DMA1, LL_DMA_STREAM_1, LL_USART_DMA_GetRegAddr(USART3));
-    LL_DMA_SetMemoryAddress(DMA1, LL_DMA_STREAM_1, (uint32_t)RS485_RxDataBuf);
-    LL_DMA_SetDataLength(DMA1, LL_DMA_STREAM_1, ARRAY_LEN(RS485_RxDataBuf));
+    LL_DMA_SetMemoryAddress(DMA1, LL_DMA_STREAM_1, (uint32_t)RS422_RxData);
+    LL_DMA_SetDataLength(DMA1, LL_DMA_STREAM_1, ARRAY_LEN(RS422_RxData));
 
     //DMA interrupt init for Rx
     LL_DMA_EnableIT_TC(DMA1, LL_DMA_STREAM_1);
@@ -697,10 +784,6 @@ static void USART3_UART_Init(void)
     LL_USART_ConfigAsyncMode(USART3);
     LL_USART_EnableDMAReq_RX(USART3);
     LL_USART_EnableIT_IDLE(USART3);
-
-    //USART interrupt init 
-    NVIC_SetPriority(USART3_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
-    NVIC_EnableIRQ(USART3_IRQn);
 
     //Enable USART3 and DMA Rx Stream 
     LL_DMA_EnableStream(DMA1, LL_DMA_STREAM_1);
@@ -955,16 +1038,6 @@ void DMA1_Stream3_IRQHandler(void)
     if (LL_DMA_IsEnabledIT_TC(DMA1, LL_DMA_STREAM_3) && LL_DMA_IsActiveFlag_TC3(DMA1)) {
         LL_DMA_ClearFlag_TC3(DMA1);             //Clear transfer complete flag
         DMA_Start_Transmit();           //Send more data
-    }
-}
-
-void USART3_IRQHandler(void) 
-{
-    //Check idle line interrupt for USART
-    if (LL_USART_IsEnabledIT_IDLE(USART3) && LL_USART_IsActiveFlag_IDLE(USART3))
-    {
-        LL_USART_ClearFlag_IDLE(USART3);        //Clear IDLE line Flag
-        startFilterFlag = true;
     }
 }
 
